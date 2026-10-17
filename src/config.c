@@ -287,6 +287,9 @@ static struct descriptor *layer_lookup_chord(struct layer *layer, uint8_t *keys,
 		size_t nm = 0;
 		struct chord *chord = &layer->chords[i];
 
+		if (chord->sz != n)
+			continue;
+
 		for (j = 0; j < n; j++) {
 			size_t k;
 			for (k = 0; k < chord->sz; k++)
@@ -315,6 +318,11 @@ static int set_layer_entry(const struct config *config,
 	size_t i;
 	int found = 0;
 
+	if (d->op == OP_UNBIND && !strchr(key, '+')) {
+		err("unbind is only valid for chords");
+		return -1;
+	}
+
 	if (strchr(key, '+')) {
 		//TODO: Handle aliases
 		char *tok;
@@ -337,6 +345,11 @@ static int set_layer_entry(const struct config *config,
 			keys[n++] = code;
 		}
 
+
+		if (d->op == OP_UNBIND && n < 2) {
+			err("unbind requires a chord of at least two keys");
+			return -1;
+		}
 
 		if ((ld = layer_lookup_chord(layer, keys, n))) {
 			*ld = *d;
@@ -1126,8 +1139,12 @@ int config_add_entry(struct config *config, const char *exp)
 
 	layer = &config->layers[idx];
 
-	if (parse_descriptor(descstr, &d, config) < 0)
+	if (descstr && !strcmp(descstr, "unbind")) {
+		memset(&d, 0, sizeof d);
+		d.op = OP_UNBIND;
+	} else if (parse_descriptor(descstr, &d, config) < 0) {
 		return -1;
+	}
 
 	return set_layer_entry(config, layer, keyname, &d);
 }

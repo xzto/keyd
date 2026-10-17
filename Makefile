@@ -101,18 +101,12 @@ test:
 	for f in *.sh; do \
 		./$$f; \
 	done
+TEST_SOURCES=src/keyboard.c src/string.c src/macro.c src/config.c \
+	src/log.c src/ini.c src/keys.c src/unicode.c
+
 test-io:
 	mkdir -p bin
-	$(CC) \
-	-DDATA_DIR=\"\" \
-	-o bin/test-io \
-		t/test-io.c \
-		src/keyboard.c \
-		src/string.c \
-		src/macro.c \
-		src/config.c \
-		src/log.c \
-		src/ini.c \
-		src/keys.c  \
-		src/unicode.c && \
+	$(CC) -DDATA_DIR=\"\" -o bin/test-io t/test-io.c $(TEST_SOURCES)
 	./bin/test-io t/test.conf t/*.t
+	$(CC) -DDATA_DIR=\"\" -o bin/test-chord-unbind t/test-chord-unbind.c $(TEST_SOURCES)
+	./bin/test-chord-unbind t/chord-unbind.conf

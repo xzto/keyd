@@ -397,6 +397,30 @@ will cause _esc_ to be produced if both _j_ and _k_ are simultaneously depressed
 Note: It may be desirable to change the default chording interval (50ms) to
 account for the physical characteristics of your keyboard.
 
+A chord may be explicitly disabled in a layer using *unbind*:
+
+```
+[main]
+j+k = esc
+
+[numbers]
+j+k = unbind
+j = 4
+k = 5
+```
+
+While _numbers_ is active, the lower-priority _j+k_ chord is excluded from
+matching, including partial matches. The individual keys use their normal layer
+bindings, preserving press order, holds, and releases. Unlike _noop_, _unbind_
+does not consume the chord or add a chording delay. Other chords involving
+these keys may still match and introduce a delay.
+
+Unbinding matches the exact set of keys, irrespective of their order. It does
+not disable longer chords containing those keys. A higher-priority layer may
+bind the chord again, and deactivating the unbinding layer restores inherited
+chords. *unbind* is only valid as a chord's entire right hand side, not as a
+single-key binding or an argument to an action.
+
 ## Unicode Support
 
 If keyd encounters a valid UTF8 sequence as a right hand value, it will try and

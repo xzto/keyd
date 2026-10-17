@@ -52,6 +52,8 @@ enum op {
 	OP_COMMAND,
 	OP_TIMEOUT,
 
+	OP_UNBIND, /* Chord matching only; never executed. */
+
 /* Experimental */
 	OP_SCROLL_TOGGLE_ON,
 	OP_SCROLL_TOGGLE_OFF,

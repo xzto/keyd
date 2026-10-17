@@ -331,6 +331,44 @@ static void enqueue_chord_event(struct keyboard *kbd, uint8_t code, uint8_t pres
 	kbd->chord.queue_sz++;
 }
 
+static int chord_is_unbound(struct keyboard *kbd, size_t layer_idx,
+			    const struct chord *chord)
+{
+	size_t idx;
+	long activation_time = kbd->layer_state[layer_idx].activation_time;
+
+	for (idx = 0; idx < kbd->config.nr_layers; idx++) {
+		struct layer *layer = &kbd->config.layers[idx];
+		long time = kbd->layer_state[idx].activation_time;
+		size_t i;
+
+		if (!kbd->layer_state[idx].active || time < activation_time ||
+		    (time == activation_time && idx <= layer_idx))
+			continue;
+
+		for (i = 0; i < layer->nr_chords; i++) {
+			const struct chord *mask = &layer->chords[i];
+			size_t j, k;
+
+			if (mask->d.op != OP_UNBIND || mask->sz != chord->sz)
+				continue;
+
+			for (j = 0; j < chord->sz; j++) {
+				for (k = 0; k < mask->sz; k++)
+					if (chord->keys[j] == mask->keys[k])
+						break;
+				if (k == mask->sz)
+					break;
+			}
+
+			if (j == chord->sz)
+				return 1;
+		}
+	}
+
+	return 0;
+}
+
 /* Returns:
  *  0 in the case of no match
  *  1 in the case of a partial match
@@ -352,9 +390,16 @@ static int check_chord_match(struct keyboard *kbd, const struct chord **chord, i
 			continue;
 
 		for (i = 0; i < layer->nr_chords; i++) {
-			int ret = chord_event_match(&layer->chords[i],
-						    kbd->chord.queue,
-						    kbd->chord.queue_sz);
+			int ret;
+
+			/* Exclude disabled chords before even buffering a partial match. */
+			if (layer->chords[i].d.op == OP_UNBIND ||
+			    chord_is_unbound(kbd, idx, &layer->chords[i]))
+				continue;
+
+			ret = chord_event_match(&layer->chords[i],
+						kbd->chord.queue,
+						kbd->chord.queue_sz);
 
 			if (ret == 2 &&
 				maxts <= kbd->layer_state[idx].activation_time) {
