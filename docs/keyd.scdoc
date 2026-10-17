@@ -73,6 +73,8 @@ Config files are stored in _/etc/keyd/_ and loaded upon initialization.
 The reload command can be used to update the working set of config
 files (e.g sudo keyd reload).
 
+Config files are also reloaded automatically when they change.
+
 A valid config file has the extension _.conf_ and *must* begin with an _[ids]_
 section that has one of the following forms:
 

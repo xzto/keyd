@@ -1,10 +1,33 @@
 #include "keyd.h"
 
+#include <sys/inotify.h>
+
 struct config_ent {
 	struct config config;
 	struct keyboard *kbd;
 	struct config_ent *next;
 };
+
+/*
+ * Config files are watched by directory rather than by file so that both
+ * atomic saves (write + rename) and symlinked targets are handled: the
+ * containing directory reports the rename no matter which inode lands at the
+ * config path. Each watched directory maps to an inotify wd so events can be
+ * filtered (CONFIG_DIR may hold unrelated files).
+ */
+struct config_watch {
+	int wd;
+	int is_config_dir;
+	int seen;
+	char path[PATH_MAX];
+};
+
+#define CONFIGWATCH_DEBOUNCE_MS 100
+
+static int configfd = -1;
+static struct config_watch config_watches[64];
+static size_t nr_config_watches;
+static long config_reload_deadline;
 
 static int ipcfd = -1;
 static struct vkbd *vkbd = NULL;
@@ -15,6 +38,152 @@ static uint8_t keystate[256];
 static int listeners[32];
 static size_t nr_listeners = 0;
 static struct keyboard *active_kbd = NULL;
+
+static long configwatch_now(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static struct config_watch *configwatch_find(int wd)
+{
+	size_t i;
+
+	for (i = 0; i < nr_config_watches; i++)
+		if (config_watches[i].wd == wd)
+			return &config_watches[i];
+
+	return NULL;
+}
+
+static void configwatch_add(const char *path, int is_config_dir)
+{
+	size_t i;
+	int wd;
+
+	for (i = 0; i < nr_config_watches; i++) {
+		if (!strcmp(config_watches[i].path, path)) {
+			config_watches[i].seen = 1;
+			config_watches[i].is_config_dir |= is_config_dir;
+			return;
+		}
+	}
+
+	if (nr_config_watches == ARRAY_SIZE(config_watches)) {
+		keyd_log("CONFIG: y{WARNING} too many directories to watch\n");
+		return;
+	}
+
+	wd = inotify_add_watch(configfd, path, IN_CREATE | IN_DELETE |
+			       IN_CLOSE_WRITE | IN_MOVED_TO | IN_MOVED_FROM |
+			       IN_ATTRIB | IN_MODIFY | IN_DELETE_SELF |
+			       IN_MOVE_SELF);
+	if (wd < 0)
+		return;
+
+	config_watches[nr_config_watches].wd = wd;
+	config_watches[nr_config_watches].is_config_dir = is_config_dir;
+	config_watches[nr_config_watches].seen = 1;
+	snprintf(config_watches[nr_config_watches].path,
+		 sizeof(config_watches[nr_config_watches].path), "%s", path);
+	nr_config_watches++;
+}
+
+/*
+ * Refresh the watch set after configs are (re)loaded. Symlinked configs are
+ * resolved so edits to the target are noticed even when the link itself is
+ * untouched. The directory is scanned directly (rather than iterating parsed
+ * configs) so a file that temporarily fails to parse keeps its watch.
+ */
+static void configwatch_refresh(void)
+{
+	size_t i;
+	DIR *dh;
+	struct dirent *dirent;
+
+	if (configfd < 0)
+		return;
+
+	for (i = 0; i < nr_config_watches; i++)
+		config_watches[i].seen = 0;
+
+	configwatch_add(CONFIG_DIR, 1);
+
+	if ((dh = opendir(CONFIG_DIR))) {
+		while ((dirent = readdir(dh))) {
+			char path[PATH_MAX];
+			char real[PATH_MAX];
+			char *slash;
+			size_t n = strlen(dirent->d_name);
+
+			if (n < 5 || strcmp(dirent->d_name + n - 5, ".conf"))
+				continue;
+
+			snprintf(path, sizeof path, "%s/%s", CONFIG_DIR, dirent->d_name);
+			if (!realpath(path, real))
+				continue;
+
+			slash = strrchr(real, '/');
+			if (slash == real)
+				slash[1] = 0;
+			else if (slash)
+				*slash = 0;
+
+			configwatch_add(real, !strcmp(real, CONFIG_DIR));
+		}
+		closedir(dh);
+	}
+
+	for (i = 0; i < nr_config_watches; ) {
+		if (config_watches[i].seen) {
+			i++;
+			continue;
+		}
+
+		inotify_rm_watch(configfd, config_watches[i].wd);
+		config_watches[i] = config_watches[--nr_config_watches];
+	}
+}
+
+/*
+ * Drain all pending events and arm a debounce timer. Editors emit a burst of
+ * events for a single save; a single reload after the burst avoids repeatedly
+ * ungrab/regrabing devices mid-edit.
+ */
+static void configwatch_handle(void)
+{
+	char buf[4096];
+	ssize_t n;
+
+	while ((n = read(configfd, buf, sizeof buf)) > 0) {
+		char *p = buf;
+
+		while (p < buf + n) {
+			struct inotify_event *ev = (struct inotify_event *)p;
+			struct config_watch *watch;
+
+			p += sizeof(*ev) + ev->len;
+
+			if (ev->mask & IN_IGNORED)
+				continue;
+
+			watch = configwatch_find(ev->wd);
+			if (!watch)
+				continue;
+
+			if (watch->is_config_dir) {
+				size_t len = strlen(ev->name);
+
+				if (len < 5 || strcmp(ev->name + len - 5, ".conf"))
+					continue;
+			}
+
+			config_reload_deadline = configwatch_now() + CONFIGWATCH_DEBOUNCE_MS;
+		}
+	}
+}
 
 static void free_configs(void)
 {
@@ -296,12 +465,17 @@ static void reload(void)
 {
 	size_t i;
 
+	config_reload_deadline = 0;
+
 	free_configs();
 	load_configs();
+	configwatch_refresh();
 
 	for (i = 0; i < device_table_sz; i++)
 		manage_device(&device_table[i]);
 
+	/* configs (and their keyboards) were just freed. */
+	active_kbd = NULL;
 	clear_vkbd();
 }
 
@@ -500,8 +674,14 @@ static int event_handler(struct event *ev)
 
 	switch (ev->type) {
 	case EV_TIMEOUT:
-		if (!active_kbd)
-			return 0;
+		if (config_reload_deadline &&
+		    configwatch_now() >= config_reload_deadline)
+			reload();
+
+		if (!active_kbd) {
+			timeout = 0;
+			break;
+		}
 
 		kev.code = 0;
 		kev.timestamp = ev->timestamp;
@@ -600,10 +780,22 @@ static int event_handler(struct event *ev)
 			}
 
 			handle_client(con);
+		} else if (ev->fd == configfd) {
+			configwatch_handle();
 		}
 		break;
 	default:
 		break;
+	}
+
+	if (config_reload_deadline) {
+		long rem = config_reload_deadline - configwatch_now();
+
+		/* A pending reload must never be mistaken for the 0 == infinite timeout. */
+		if (rem <= 0)
+			rem = 1;
+		if (timeout <= 0 || rem < timeout)
+			timeout = (int)rem;
 	}
 
 	return timeout;
@@ -633,7 +825,14 @@ int run_daemon(int argc, char *argv[])
 		exit(-1);
 	}
 
+	configfd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (configfd < 0) {
+		perror("inotify_init1");
+		exit(-1);
+	}
+
 	evloop_add_fd(ipcfd);
+	evloop_add_fd(configfd);
 
 	reload();
 
