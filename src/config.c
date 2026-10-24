@@ -90,6 +90,7 @@ static struct {
 	{ "oneshotk", 	NULL,	OP_ONESHOTK,	{ ARG_LAYER, ARG_KEYSEQUENCE_DESCRIPTOR } },
 
 	{ "layer", 	NULL,	OP_LAYER,	{ ARG_LAYER } },
+	{ "noinherit", 	NULL,	OP_NOINHERIT,	{ ARG_DESCRIPTOR } },
 
 	{ "overload", 	NULL,	OP_OVERLOAD,			{ ARG_LAYER, ARG_DESCRIPTOR } },
 	{ "overloadt", 	NULL,	OP_OVERLOAD_TIMEOUT,		{ ARG_LAYER, ARG_DESCRIPTOR, ARG_TIMEOUT } },
@@ -629,7 +630,7 @@ static int parse_command(const char *s, struct command *command)
 
 static int parse_descriptor(char *s,
 			    struct descriptor *d,
-			    struct config *config)
+			    struct config *config, int allow_inherit)
 {
 	char *fn = NULL;
 	char *args[5];
@@ -641,6 +642,11 @@ static int parse_descriptor(char *s,
 
 	if (!s || !s[0]) {
 		d->op = 0;
+		return 0;
+	}
+
+	if (allow_inherit && !strcmp(s, "inherit")) {
+		*d = (struct descriptor) { .op = OP_INHERIT };
 		return 0;
 	}
 
@@ -774,8 +780,12 @@ static int parse_descriptor(char *s,
 						break;
 					case ARG_KEYSEQUENCE_DESCRIPTOR:
 					case ARG_DESCRIPTOR:
-						if (parse_descriptor(argstr, &desc, config))
+						if (parse_descriptor(argstr, &desc, config, allow_inherit))
 							return -1;
+
+						/* Only the outer binding can opt out of inheritance. */
+						if (desc.op == OP_NOINHERIT)
+							desc = config->descriptors[desc.args[0].idx];
 
 						if (config->nr_descriptors >= ARRAY_SIZE(config->descriptors)) {
 							err("maximum descriptors exceeded");
@@ -1098,12 +1108,13 @@ int config_get_layer_index(const struct config *config, const char *name)
 	return -1;
 }
 
-static int parse_virtual_prefix(char **s)
+static int parse_binding_prefix(char **s, const char *prefix)
 {
-	if (strncmp(*s, "virtual", 7) || ((*s)[7] != ' ' && (*s)[7] != '\t'))
+	size_t len = strlen(prefix);
+	if (strncmp(*s, prefix, len) || ((*s)[len] != ' ' && (*s)[len] != '\t'))
 		return 0;
 
-	*s += 7;
+	*s += len;
 	*s += strspn(*s, " \t");
 	return 1;
 }
@@ -1139,6 +1150,56 @@ static int parse_virtual_descriptor(char *s, struct descriptor *d, struct config
 	return 0;
 }
 
+/* Count source placeholders before lettermod expands its tap argument twice. */
+static int count_inherit(char *s)
+{
+	char *fn, *args[5];
+	size_t nargs;
+	uint8_t code, mods;
+
+	if (!s)
+		return -1;
+	if (!strcmp(s, "inherit"))
+		return 1;
+	if (!parse_key_sequence(s, &code, &mods))
+		return 0;
+	if (parse_fn(s, &fn, args, &nargs))
+		return -1;
+	if (!strcmp(fn, "lettermod"))
+		return nargs == 4 ? count_inherit(args[1]) : -1;
+
+	for (size_t i = 0; i < ARRAY_SIZE(actions); i++) {
+		if (strcmp(fn, actions[i].name))
+			continue;
+		switch (actions[i].op) {
+		case OP_OVERLOAD:
+		case OP_OVERLOAD_TIMEOUT:
+		case OP_OVERLOAD_TIMEOUT_TAP:
+		case OP_OVERLOAD_IDLE_TIMEOUT:
+		case OP_TIMEOUT:
+		case OP_LAYER:
+			break;
+		default:
+			return -1;
+		}
+
+		int count = 0;
+		size_t j;
+		for (j = 0; j < MAX_DESCRIPTOR_ARGS && actions[i].args[j]; j++) {
+			if (j >= nargs)
+				return -1;
+			if (actions[i].args[j] == ARG_DESCRIPTOR) {
+				int n = count_inherit(args[j]);
+				if (n < 0)
+					return -1;
+				count += n;
+			}
+		}
+		return j == nargs ? count : -1;
+	}
+	return -1;
+}
+
 /*
  * Adds a binding of the form [<layer>.]<key> = <descriptor expression>
  * to the given config.
@@ -1150,7 +1211,7 @@ int config_add_entry(struct config *config, const char *exp)
 	struct descriptor d;
 	struct layer *layer;
 	int idx;
-	int is_virtual = 0;
+	int is_virtual, is_inherit;
 	uint8_t code = 0, mods = 0;
 
 	static char buf[MAX_EXP_LEN];
@@ -1162,17 +1223,19 @@ int config_add_entry(struct config *config, const char *exp)
 
 	strcpy(buf, exp);
 	s = buf;
-	is_virtual = parse_virtual_prefix(&s);
+	is_virtual = parse_binding_prefix(&s, "virtual");
+	is_inherit = !is_virtual && parse_binding_prefix(&s, "inherit");
 
 	dot = strchr(s, '.');
 	paren = strchr(s, '(');
 
-	/* Dots after an unqualified virtual prefix belong to the binding. */
-	if (!is_virtual && dot && dot != s && (!paren || dot < paren)) {
+	/* Dots after an unqualified prefix belong to the binding. */
+	if (!is_virtual && !is_inherit && dot && dot != s && (!paren || dot < paren)) {
 		layername = s;
 		*dot = 0;
 		s = dot+1;
-		is_virtual = parse_virtual_prefix(&s);
+		is_virtual = parse_binding_prefix(&s, "virtual");
+		is_inherit = !is_virtual && parse_binding_prefix(&s, "inherit");
 	}
 
 	parse_kvp(s, &keyname, &descstr);
@@ -1184,6 +1247,36 @@ int config_add_entry(struct config *config, const char *exp)
 	}
 
 	layer = &config->layers[idx];
+
+	if (is_inherit) {
+		char rhs[MAX_EXP_LEN];
+		size_t nr_descriptors = config->nr_descriptors;
+
+		if (idx || parse_key_sequence(keyname, &code, &mods) || mods) {
+			err("inherit requires an unmodified physical key on main");
+			return -1;
+		}
+		if (!descstr) {
+			err("inherit requires a tap/hold expression with exactly one inherit");
+			return -1;
+		}
+		strcpy(rhs, descstr);
+		if (count_inherit(rhs) != 1) {
+			err("inherit requires a tap/hold expression with exactly one inherit");
+			return -1;
+		}
+		if (parse_descriptor(descstr, &d, config, 1) < 0) {
+			config->nr_descriptors = nr_descriptors;
+			return -1;
+		}
+		if (d.op == OP_INHERIT) {
+			err("inherit requires a tap/hold expression");
+			return -1;
+		}
+		config->inherit_bindings[code] = d;
+		config->has_inherit = 1;
+		return 0;
+	}
 
 	if (is_virtual) {
 		size_t i;
@@ -1221,7 +1314,7 @@ int config_add_entry(struct config *config, const char *exp)
 	if (descstr && !strcmp(descstr, "unbind")) {
 		memset(&d, 0, sizeof d);
 		d.op = OP_UNBIND;
-	} else if (parse_descriptor(descstr, &d, config) < 0) {
+	} else if (parse_descriptor(descstr, &d, config, 0) < 0) {
 		return -1;
 	}
 

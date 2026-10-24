@@ -112,3 +112,5 @@ test-io:
 	./bin/test-chord-unbind t/chord-unbind.conf
 	$(CC) -DDATA_DIR=\"\" -o bin/test-virtual t/test-virtual.c $(TEST_SOURCES)
 	./bin/test-virtual t/virtual.conf
+	$(CC) -DDATA_DIR=\"\" -o bin/test-inherit t/test-inherit.c $(TEST_SOURCES)
+	./bin/test-inherit t/inherit.conf

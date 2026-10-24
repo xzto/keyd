@@ -20,6 +20,7 @@ struct keyboard;
 struct cache_entry {
 	uint8_t code;
 	struct descriptor d;
+	struct descriptor inherited;
 	int dl;
 	int layer;
 };
@@ -106,6 +107,7 @@ struct keyboard {
 
 		struct descriptor action1;
 		struct descriptor action2;
+		struct descriptor inherited;
 	} pending_timeout;
 
 	struct pending_overload {
@@ -120,6 +122,7 @@ struct keyboard {
 
 		struct descriptor action1;
 		struct descriptor action2;
+		struct descriptor inherited;
 	} pending_overload;
 
 	struct {

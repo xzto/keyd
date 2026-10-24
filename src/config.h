@@ -54,6 +54,8 @@ enum op {
 	OP_COMMAND,
 	OP_TIMEOUT,
 
+	OP_NOINHERIT, /* Binding-level opt-out; stripped before execution. */
+	OP_INHERIT, /* Tap placeholder in inheritance profiles. */
 	OP_UNBIND, /* Chord matching only; never executed. */
 
 /* Experimental */
@@ -131,6 +133,9 @@ struct config {
 
 	uint32_t virtual_layers;
 	uint32_t virtual_layers_by_code[256];
+
+	uint8_t has_inherit;
+	struct descriptor inherit_bindings[256];
 
 	/* Auxiliary descriptors used by layer bindings. */
 	struct descriptor descriptors[1024];

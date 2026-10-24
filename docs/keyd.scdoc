@@ -296,6 +296,80 @@ b = c
 c = d
 ```
 
+## Inherited Tap Bindings
+
+An *inherit* binding attaches tap/hold behaviour to a physical key independently
+of the tap keysequence selected by ordinary layer lookup:
+
+```
+	[main]
+	inherit a = lettermod(meta, inherit, 150, 200)
+	inherit s = lettermod(alt, inherit, 150, 200)
+
+	[number]
+	a = 1
+	s = S-minus
+
+	[nav]
+	a = noop
+```
+
+Here physical _a_ taps _a_ normally, _1_ on _number_, and nothing on _nav_. Holding
+it activates Meta in all three cases. The hold position follows the physical key,
+not its resolved output. Ordinary layout and composite bindings also supply tap
+outputs. *main.inherit a = ...* is the equivalent qualified syntax; inheritance
+profiles may only be defined on _main_, and their left-hand sides must be single,
+unmodified physical keys.
+
+The right-hand side may combine *lettermod*, *overload*, *overloadt*, *overloadt2*,
+*overloadi*, *timeout*, and *layer* actions with keysequences. It must contain
+exactly one *inherit* action, standing for the selected tap binding. This count
+precedes alias expansion: *lettermod* internally uses its tap argument twice.
+The placeholder is not accepted in ordinary bindings or as a layer argument.
+For example:
+
+```
+	inherit a = overloadt2(meta, inherit, 200)
+	inherit s = timeout(inherit, 200, layer(alt))
+```
+
+Only tap bindings are decorated: direct keysequences (including *noop*) and
+*oneshotm* actions whose macro contains exactly one keysequence. Explicit
+lettermods, overloads, timeouts, macros, commands, and layer actions override the
+profile and execute unchanged. This permits a layer to define a custom overload
+without nesting it inside the inherited one. Repeated profile definitions replace
+the earlier definition; a runtime *reset* restores the configured profiles.
+
+Use *noinherit(<action>)* to opt out explicitly for a binding:
+
+```
+	[nav]
+	a = noinherit(noop)
+	s = noinherit(left)
+```
+
+Unlike *a = noop*, which retains the inherited hold modifier, *a = noinherit(noop)*
+disables both tap and hold. *noinherit(left)* emits and holds Left immediately,
+without the inherited tap/hold timing. The wrapper accepts any ordinary action
+and preserves its normal behaviour. Only a binding-level wrapper opts out;
+wrappers inside other actions are transparent, since nested actions are not
+independently decorated. Virtual matching still applies to the unwrapped binding,
+so *noinherit* does not disable magic-caps. The wrapper is not permitted in an
+inheritance profile.
+
+The tap action and its modifier context are captured on key-down and retained
+through delayed resolution and release, even if layers change. Existing
+*lettermod* timing is preserved: a quick tap followed by another press enters the
+immediate-tap path, leaving the output held for normal key repeat rather than
+activating the hold modifier.
+
+Virtual bindings are resolved before the tap action is captured, so magic-caps
+can transform and renew an inherited tap without duplicating home-row modifiers
+on symbol layers. Existing single-key *oneshotm* tap bindings work too. The tap
+action executes only if that branch is selected; a modifier hold emits no tap
+output and does not renew magic-caps. Macro output and other nested actions do
+not gain recursive virtual lookup.
+
 ## Virtual Bindings
 
 A binding prefixed with *virtual* matches the keysequence resolved by ordinary

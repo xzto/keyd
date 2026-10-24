@@ -587,7 +587,7 @@ static long calculate_main_loop_timeout(struct keyboard *kbd, long time)
 
 static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			       const struct descriptor *d, int dl,
-			       int pressed, long time)
+			       const struct descriptor *inherited, int pressed, long time)
 {
 	int i;
 	int timeout = 0;
@@ -615,6 +615,15 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 		uint8_t new_code;
 		struct pending_timeout *pt;
 
+	case OP_INHERIT:
+		assert(inherited->op == OP_KEYSEQUENCE || inherited->op == OP_ONESHOTM);
+		timeout = process_descriptor(kbd, code, inherited, dl, inherited, pressed, time);
+		if (inherited->op == OP_ONESHOTM) {
+			uint8_t mods = kbd->config.macros[inherited->args[1].idx].entries[0].data >> 8;
+			if (!mods || mods == MOD_SHIFT)
+				kbd->last_simple_key_time = time;
+		}
+		break;
 	case OP_KEYSEQUENCE:
 		new_code = d->args[0].code;
 		mods = d->args[1].mods;
@@ -675,7 +684,7 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			else
 				action = &kbd->config.descriptors[d->args[0].idx];
 
-			process_descriptor(kbd, code, action, dl, 1, time);
+			process_descriptor(kbd, code, action, dl, inherited, 1, time);
 			for (i = 0; i < CACHE_SIZE; i++) {
 				if (code == kbd->cache[i].code) {
 					kbd->cache[i].d = *action;
@@ -694,6 +703,7 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			kbd->pending_overload.resolve_on_interrupt = d->op == OP_OVERLOAD_TIMEOUT_TAP;
 
 			kbd->pending_overload.dl = dl;
+			kbd->pending_overload.inherited = *inherited;
 			kbd->pending_overload.action1 = *action;
 			kbd->pending_overload.action2.op = OP_LAYER;
 			kbd->pending_overload.action2.args[0].idx = layer;
@@ -736,7 +746,7 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 		break;
 	case OP_REPEAT:
 		if(pressed) {
-			process_descriptor(kbd, code, &kbd->last_repeatable_action, dl, 1, time);
+			process_descriptor(kbd, code, &kbd->last_repeatable_action, dl, inherited, 1, time);
 
 			for (i = 0; i < CACHE_SIZE; i++)
 				if (kbd->cache[i].code == code)
@@ -770,8 +780,8 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 					struct macro *macro = &kbd->config.macros[action->args[0].idx];
 					execute_macro(kbd, dl, macro);
 				} else {
-					process_descriptor(kbd, code, action, dl, 1, time);
-					process_descriptor(kbd, code, action, dl, 0, time);
+					process_descriptor(kbd, code, action, dl, inherited, 1, time);
+					process_descriptor(kbd, code, action, dl, inherited, 0, time);
 				}
 			}
 		}
@@ -784,14 +794,14 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 
 		if (pressed) {
 			if (d->op == OP_ONESHOTK)
-				process_descriptor(kbd, code, &kbd->config.descriptors[d->args[1].idx], dl, 1, time);
+				process_descriptor(kbd, code, &kbd->config.descriptors[d->args[1].idx], dl, inherited, 1, time);
 
 			activate_layer(kbd, code, idx);
 			update_mods(kbd, dl, 0);
 			kbd->oneshot_latch = 1;
 		} else {
 			if (d->op == OP_ONESHOTK)
-				process_descriptor(kbd, code, &kbd->config.descriptors[d->args[1].idx], dl, 0, time);
+				process_descriptor(kbd, code, &kbd->config.descriptors[d->args[1].idx], dl, inherited, 0, time);
 
 			if (kbd->oneshot_latch) {
 				kbd->layer_state[idx].oneshot_depth++;
@@ -859,6 +869,7 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 		if (pressed) {
 			pt->code = code;
 			pt->dl = dl;
+			pt->inherited = *inherited;
 
 			pt->action1 = kbd->config.descriptors[d->args[0].idx];
 			pt->expiration = time + d->args[1].timeout;
@@ -1184,8 +1195,8 @@ int handle_pending_timeout(struct keyboard *kbd, uint8_t event_code, int pressed
 			struct descriptor action = time >= pt.expiration ? pt.action2 : pt.action1;
 			kbd->pending_timeout.code = 0;
 
-			process_descriptor(kbd, pt.code, &action, pt.dl, 1, time);
-			process_descriptor(kbd, pt.code, &action, pt.dl, 0, time);
+			process_descriptor(kbd, pt.code, &action, pt.dl, &pt.inherited, 1, time);
+			process_descriptor(kbd, pt.code, &action, pt.dl, &pt.inherited, 0, time);
 		}
 	} else if (time >= pt.expiration || (event_code && (pressed || event_code == pt.code))) {
 		struct descriptor action = time >= pt.expiration ? pt.action2 : pt.action1;
@@ -1195,8 +1206,9 @@ int handle_pending_timeout(struct keyboard *kbd, uint8_t event_code, int pressed
 			.code = pt.code,
 			.dl = pt.dl,
 			.d = action,
+			.inherited = pt.inherited,
 		});
-		process_descriptor(kbd, pt.code, &action, pt.dl, 1, time);
+		process_descriptor(kbd, pt.code, &action, pt.dl, &pt.inherited, 1, time);
 	}
 
 	return 0;
@@ -1253,6 +1265,7 @@ int handle_pending_overload(struct keyboard *kbd, uint8_t code, int pressed, lon
 
 		uint8_t code = kbd->pending_overload.code;
 		int dl = kbd->pending_overload.dl;
+		struct descriptor inherited = kbd->pending_overload.inherited;
 
 		memcpy(queue, kbd->pending_overload.queue, sizeof kbd->pending_overload.queue);
 
@@ -1262,9 +1275,10 @@ int handle_pending_overload(struct keyboard *kbd, uint8_t code, int pressed, lon
 		cache_set(kbd, code, &(struct cache_entry) {
 			.d = action,
 			.dl = dl,
+			.inherited = inherited,
 			.layer = 0,
 		});
-		process_descriptor(kbd, code, &action, dl, 1, time);
+		process_descriptor(kbd, code, &action, dl, &inherited, 1, time);
 
 		/* Flush queued events */
 		kbd_process_events(kbd, queue, queue_sz);
@@ -1312,7 +1326,7 @@ static long process_event(struct keyboard *kbd, uint8_t code, int pressed, long 
 	}
 
 	if (code) {
-		struct descriptor d;
+		struct descriptor d, inherited = {0};
 		int dl = 0;
 
 		if (pressed) {
@@ -1327,11 +1341,29 @@ static long process_event(struct keyboard *kbd, uint8_t code, int pressed, long 
 
 			lookup_descriptor(kbd, code, &d, &dl);
 
+			int noinherit = d.op == OP_NOINHERIT;
+			if (noinherit)
+				d = kbd->config.descriptors[d.args[0].idx];
+
+			int wrap = 0;
+			if (!noinherit && kbd->config.has_inherit && kbd->config.inherit_bindings[code].op) {
+				wrap = d.op == OP_KEYSEQUENCE;
+				if (d.op == OP_ONESHOTM) {
+					struct macro *m = &kbd->config.macros[d.args[1].idx];
+					wrap = m->sz == 1 && m->entries[0].type == MACRO_KEYSEQUENCE;
+				}
+			}
+
 			if (kbd->active_virtual_layers && d.op == OP_KEYSEQUENCE &&
 			    (kbd->active_virtual_layers & kbd->config.virtual_layers_by_code[d.args[0].code]))
 				lookup_virtual(kbd, &d);
 
-			if (cache_set(kbd, code, &(struct cache_entry) { .d = d, .dl = dl, .layer = 0 }))
+			if (wrap) {
+				inherited = d;
+				d = kbd->config.inherit_bindings[code];
+			}
+
+			if (cache_set(kbd, code, &(struct cache_entry) { .d = d, .dl = dl, .inherited = inherited, .layer = 0 }))
 				goto exit;
 		} else {
 			struct cache_entry *ce;
@@ -1342,9 +1374,10 @@ static long process_event(struct keyboard *kbd, uint8_t code, int pressed, long 
 
 			d = ce->d;
 			dl = ce->dl;
+			inherited = ce->inherited;
 		}
 
-		process_descriptor(kbd, code, &d, dl, pressed, time);
+		process_descriptor(kbd, code, &d, dl, &inherited, pressed, time);
 	}
 
 
