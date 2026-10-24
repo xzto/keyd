@@ -319,12 +319,17 @@ it activates Meta in all three cases. The hold position follows the physical key
 not its resolved output. Ordinary layout and composite bindings also supply tap
 outputs. *main.inherit a = ...* is the equivalent qualified syntax; inheritance
 profiles may only be defined on _main_, and their left-hand sides must be single,
-unmodified physical keys.
+unmodified physical keys. *[aliases]* is not consulted for an inheritance profile's
+left-hand side: *inherit a* always selects physical A, even if another key has
+been assigned the alias _a_. Custom alias names cannot be used instead of physical
+key names. Aliases can change the selected tap binding, but never the physical
+position of the inherited hold action.
 
 The right-hand side may combine *lettermod*, *overload*, *overloadt*, *overloadt2*,
 *overloadi*, *timeout*, and *layer* actions with keysequences. It must contain
 exactly one *inherit* action, standing for the selected tap binding. This count
-precedes alias expansion: *lettermod* internally uses its tap argument twice.
+precedes expansion of the built-in *lettermod* shorthand, which uses its tap
+argument twice.
 The placeholder is not accepted in ordinary bindings or as a layer argument.
 For example:
 
@@ -596,10 +601,13 @@ the form:
 
 where _<key>_ must be a valid key name.
 
-Note that <name> may itself be a valid key name, in which case all references
-to the key within the config file will be replaced with the new key.
-Additionally, if the assigned alias is a valid key name, the corresponding
-keycode will be assigned to the key by default. This makes it possible to
+Aliases are expanded only on the left-hand side of ordinary single-key bindings.
+They do not rewrite right-hand-side key names, chord members, *inherit* profile
+keys, or *virtual* match expressions. Virtual bindings instead match the resolved
+output, including outputs selected through ordinary alias bindings.
+
+If the assigned alias is itself a valid key name, that keycode is also assigned
+to the physical key in _main_ by default. This makes it possible to
 redefine keys before any bindings are applied and is particularly useful in
 conjunction with the include mechanism to account for variations in hardware.
 

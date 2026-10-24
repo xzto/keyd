@@ -372,9 +372,55 @@ static void test_parser_restrictions(void)
 	assert(kbd->config.layers[0].nr_virtual_bindings == 2);
 }
 
+static void test_aliases(const char *path)
+{
+	assert(config_parse(&config, path) == 0);
+	reset();
+	TAP(102ND); TAP(Z);
+	EXPECT(KEYD_Z, -KEYD_Z, KEYD_X, -KEYD_X);
+	TAP(F1);
+	TAP(102ND);
+	EXPECT(KEYD_LEFTSHIFT, KEYD_Z, -KEYD_Z, -KEYD_LEFTSHIFT);
+	assert(active("magic-caps"));
+	TAP(Z);
+	EXPECT(KEYD_LEFTSHIFT, KEYD_X, -KEYD_X, -KEYD_LEFTSHIFT);
+	assert(active("magic-caps"));
+
+	reset();
+	DOWN(F2); TAP(F1);
+	TAP(X); TAP(C);
+	EXPECT(KEYD_MINUS, -KEYD_MINUS, KEYD_MINUS, -KEYD_MINUS);
+	assert(active("magic-caps"));
+	TAP(Z);
+	EXPECT(KEYD_EQUAL, -KEYD_EQUAL);
+	assert(!active("magic-caps"));
+	UP(F2);
+	assert(kbd_eval(kbd, "magic-caps.virtual tap-group = oneshotm(magic-caps, minus)") < 0);
+
+	reset();
+	TAP(F1); TAP(A);
+	EXPECT(KEYD_LEFTSHIFT, KEYD_S, -KEYD_S, -KEYD_LEFTSHIFT);
+	assert(active("magic-caps"));
+
+	reset();
+	DOWN(A); WAIT(201);
+	EXPECT(KEYD_LEFTMETA);
+	UP(A);
+	EXPECT(-KEYD_LEFTMETA);
+	DOWN(V); WAIT(201);
+	EXPECT(KEYD_A);
+	assert(!active("meta"));
+	UP(V);
+	EXPECT(-KEYD_A);
+	assert(kbd_eval(kbd, "main.a = minus") == 0);
+	TAP(V); TAP(A);
+	EXPECT(KEYD_MINUS, -KEYD_MINUS, KEYD_S, -KEYD_S);
+	assert(kbd_eval(kbd, "inherit tap-group = lettermod(meta, inherit, 150, 200)") < 0);
+}
+
 int main(int argc, char **argv)
 {
-	if (argc != 2 || config_parse(&config, argv[1]))
+	if (argc != 3 || config_parse(&config, argv[1]))
 		return 1;
 	test_magic_caps();
 	test_modifiers();
@@ -384,6 +430,7 @@ int main(int argc, char **argv)
 	test_lifecycle();
 	test_dot_bindings();
 	test_parser_restrictions();
+	test_aliases(argv[2]);
 	free(kbd);
 	puts("Virtual binding tests PASSED");
 	return 0;
