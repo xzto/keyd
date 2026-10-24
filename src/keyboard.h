@@ -41,6 +41,8 @@ struct keyboard {
 	struct config config;
 	struct output output;
 
+	uint32_t active_virtual_layers;
+
 	/*
 	 * Cache descriptors to preserve code->descriptor
 	 * mappings in the event of mid-stroke layer changes.

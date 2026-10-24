@@ -15,6 +15,8 @@
 #define MAX_LAYERS		32
 #define MAX_EXP_LEN		512
 
+_Static_assert(MAX_LAYERS <= 32, "virtual layer masks must fit in uint32_t");
+
 
 #ifndef PATH_MAX
 #define PATH_MAX 1024
@@ -104,6 +106,13 @@ struct layer {
 	uint8_t mods;
 	struct descriptor keymap[256];
 
+	struct {
+		uint8_t code;
+		uint8_t mods;
+		struct descriptor d;
+	} virtual_bindings[256];
+	size_t nr_virtual_bindings;
+
 	struct chord chords[64];
 	size_t nr_chords;
 
@@ -119,6 +128,9 @@ struct command {
 struct config {
 	char path[PATH_MAX];
 	struct layer layers[MAX_LAYERS];
+
+	uint32_t virtual_layers;
+	uint32_t virtual_layers_by_code[256];
 
 	/* Auxiliary descriptors used by layer bindings. */
 	struct descriptor descriptors[1024];

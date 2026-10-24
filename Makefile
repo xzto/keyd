@@ -110,3 +110,5 @@ test-io:
 	./bin/test-io t/test.conf t/*.t
 	$(CC) -DDATA_DIR=\"\" -o bin/test-chord-unbind t/test-chord-unbind.c $(TEST_SOURCES)
 	./bin/test-chord-unbind t/chord-unbind.conf
+	$(CC) -DDATA_DIR=\"\" -o bin/test-virtual t/test-virtual.c $(TEST_SOURCES)
+	./bin/test-virtual t/virtual.conf

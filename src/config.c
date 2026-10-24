@@ -1098,6 +1098,47 @@ int config_get_layer_index(const struct config *config, const char *name)
 	return -1;
 }
 
+static int parse_virtual_prefix(char **s)
+{
+	if (strncmp(*s, "virtual", 7) || ((*s)[7] != ' ' && (*s)[7] != '\t'))
+		return 0;
+
+	*s += 7;
+	*s += strspn(*s, " \t");
+	return 1;
+}
+
+static int parse_virtual_descriptor(char *s, struct descriptor *d, struct config *config)
+{
+	char *fn, *args[5];
+	size_t nargs;
+	struct macro macro;
+	int layer;
+
+	if (!s || parse_fn(s, &fn, args, &nargs) || strcmp(fn, "oneshotm") || nargs != 2 ||
+	    parse_macro_expression(args[1], &macro) || macro.sz != 1 ||
+	    macro.entries[0].type != MACRO_KEYSEQUENCE) {
+		err("virtual requires oneshotm(layer, single-keysequence)");
+		return -1;
+	}
+
+	layer = config_get_layer_index(config, args[0]);
+	if (layer <= 0 || config->layers[layer].type == LT_LAYOUT) {
+		err("%s is not a valid oneshot layer", args[0]);
+		return -1;
+	}
+	if (config->nr_macros >= ARRAY_SIZE(config->macros)) {
+		err("max macros (%d) exceeded", ARRAY_SIZE(config->macros));
+		return -1;
+	}
+
+	*d = (struct descriptor) { .op = OP_ONESHOTM };
+	d->args[0].idx = layer;
+	d->args[1].idx = config->nr_macros;
+	config->macros[config->nr_macros++] = macro;
+	return 0;
+}
+
 /*
  * Adds a binding of the form [<layer>.]<key> = <descriptor expression>
  * to the given config.
@@ -1109,6 +1150,8 @@ int config_add_entry(struct config *config, const char *exp)
 	struct descriptor d;
 	struct layer *layer;
 	int idx;
+	int is_virtual = 0;
+	uint8_t code = 0, mods = 0;
 
 	static char buf[MAX_EXP_LEN];
 
@@ -1119,14 +1162,17 @@ int config_add_entry(struct config *config, const char *exp)
 
 	strcpy(buf, exp);
 	s = buf;
+	is_virtual = parse_virtual_prefix(&s);
 
 	dot = strchr(s, '.');
 	paren = strchr(s, '(');
 
-	if (dot && dot != s && (!paren || dot < paren)) {
+	/* Dots after an unqualified virtual prefix belong to the binding. */
+	if (!is_virtual && dot && dot != s && (!paren || dot < paren)) {
 		layername = s;
 		*dot = 0;
 		s = dot+1;
+		is_virtual = parse_virtual_prefix(&s);
 	}
 
 	parse_kvp(s, &keyname, &descstr);
@@ -1138,6 +1184,39 @@ int config_add_entry(struct config *config, const char *exp)
 	}
 
 	layer = &config->layers[idx];
+
+	if (is_virtual) {
+		size_t i;
+		if (layer->type == LT_COMPOSITE) {
+			err("virtual bindings cannot be defined in composite layers");
+			return -1;
+		}
+		if (parse_key_sequence(keyname, &code, &mods)) {
+			err("%s is not a valid virtual keysequence", keyname);
+			return -1;
+		}
+		for (i = 0; i < layer->nr_virtual_bindings; i++)
+			if (layer->virtual_bindings[i].code == code && layer->virtual_bindings[i].mods == mods)
+				break;
+
+		if (i == ARRAY_SIZE(layer->virtual_bindings)) {
+			err("maximum virtual bindings per layer (%d) exceeded", ARRAY_SIZE(layer->virtual_bindings));
+			return -1;
+		}
+
+		if (parse_virtual_descriptor(descstr, &d, config) < 0)
+			return -1;
+
+		layer->virtual_bindings[i].code = code;
+		layer->virtual_bindings[i].mods = mods;
+		layer->virtual_bindings[i].d = d;
+		if (i == layer->nr_virtual_bindings)
+			layer->nr_virtual_bindings++;
+
+		config->virtual_layers |= UINT32_C(1) << idx;
+		config->virtual_layers_by_code[code] |= UINT32_C(1) << idx;
+		return 0;
+	}
 
 	if (descstr && !strcmp(descstr, "unbind")) {
 		memset(&d, 0, sizeof d);

@@ -296,6 +296,58 @@ b = c
 c = d
 ```
 
+## Virtual Bindings
+
+A binding prefixed with *virtual* matches the keysequence resolved by ordinary
+layer lookup, rather than the physical key:
+
+```
+	[main]
+	capslock = oneshot(magic-caps)
+	rightalt = layer(symbols)
+
+	[symbols]
+	a = minus
+
+	[magic-caps]
+	virtual a = oneshotm(magic-caps, A)
+	virtual minus = oneshotm(magic-caps, minus)
+```
+
+While _magic-caps_ is active, either physical _minus_ or _a_ in the symbols layer
+emits _minus_ and renews the oneshot. The letter rule also follows the active
+layout. Rules can be added for the remaining letters in the same way.
+
+The right-hand side must be *oneshotm(<layer>, <single keysequence>)*: emit one
+keysequence and renew a oneshot. A macro argument is accepted only if it contains
+exactly one keysequence. Other actions, including *swap*, overloads, timeouts,
+commands, and multi-key macros, are rejected. Ordinary bindings remain unrestricted.
+
+Virtual bindings cannot be defined in composite layers. Among active layers with
+matching virtual bindings, the most recently activated layer wins. Ordinary
+composite bindings still resolve first, and their resulting keysequences can match
+virtual bindings. Repeated definitions of the same virtual binding replace the
+earlier definition.
+
+The match includes modifiers explicitly specified by the resolved binding:
+*virtual minus* does not match a binding producing *S-minus* or *C-minus*. Held
+modifiers are inherited separately and do not affect matching. Thus holding Shift
+or Control and pressing Minus still matches *virtual minus*. The replacement retains
+the original physical binding's modifier exclusion context; modifiers belonging
+to that binding's layer remain excluded, and other active modifiers are inherited
+as usual.
+
+Only direct keysequence bindings (including default bindings and chord results)
+are matched. Macro output and keys emitted by nested actions do not undergo virtual
+lookup. The replacement is executed once, without further virtual lookup, so a
+virtual binding may safely emit the same key it matches. Chords and aliases cannot
+be used as virtual match expressions; use a keysequence. There may be up to 256
+virtual bindings per layer.
+
+For example, *z = macro(0 minus =)* emits the entire macro unchanged even when
+*virtual minus* is defined on an active layer. It consumes any pending oneshot
+as an ordinary macro would; the embedded Minus does not renew _magic-caps_.
+
 ## Composite Layers
 
 A special kind of layer called a *composite layer* can be defined by creating a

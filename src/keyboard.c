@@ -253,12 +253,60 @@ static void lookup_descriptor(struct keyboard *kbd, uint8_t code,
 	}
 }
 
+/* Rebuild only on layer/config changes, never on ordinary key lookup. */
+static void update_virtual_layers(struct keyboard *kbd)
+{
+	uint32_t candidates = kbd->config.virtual_layers;
+	kbd->active_virtual_layers = 0;
+
+	while (candidates) {
+		unsigned i = __builtin_ctz(candidates);
+		candidates &= candidates - 1;
+
+		if (kbd->layer_state[i].active)
+			kbd->active_virtual_layers |= UINT32_C(1) << i;
+	}
+}
+
+static void lookup_virtual(struct keyboard *kbd, struct descriptor *d)
+{
+	uint32_t candidates = kbd->active_virtual_layers &
+		kbd->config.virtual_layers_by_code[d->args[0].code];
+	const struct descriptor *replacement = NULL;
+	long maxts = -1;
+
+	while (candidates) {
+		unsigned i = __builtin_ctz(candidates);
+		struct layer *layer = &kbd->config.layers[i];
+		long ts = kbd->layer_state[i].activation_time;
+		candidates &= candidates - 1;
+
+		for (size_t j = 0; j < layer->nr_virtual_bindings; j++) {
+			if (layer->virtual_bindings[j].code != d->args[0].code ||
+			    layer->virtual_bindings[j].mods != d->args[1].mods)
+				continue;
+
+			if (ts >= maxts) {
+				replacement = &layer->virtual_bindings[j].d;
+				maxts = ts;
+			}
+			break;
+		}
+	}
+
+	/* Preserve the original binding's modifier exclusion context. */
+	if (replacement)
+		*d = *replacement;
+}
+
 static void deactivate_layer(struct keyboard *kbd, int idx)
 {
 	dbg("Deactivating layer %s", kbd->config.layers[idx].name);
 
 	assert(kbd->layer_state[idx].active > 0);
 	kbd->layer_state[idx].active--;
+	if (kbd->config.virtual_layers && !kbd->layer_state[idx].active)
+		update_virtual_layers(kbd);
 
 	kbd->output.on_layer_change(kbd, &kbd->config.layers[idx], 0);
 }
@@ -275,6 +323,8 @@ static void activate_layer(struct keyboard *kbd, uint8_t code, int idx)
 
 	kbd->layer_state[idx].activation_time = get_time();
 	kbd->layer_state[idx].active++;
+	if (kbd->config.virtual_layers && kbd->layer_state[idx].active == 1)
+		update_virtual_layers(kbd);
 
 	if ((ce = cache_get(kbd, code)))
 		ce->layer = idx;
@@ -505,6 +555,8 @@ static void setlayout(struct keyboard *kbd, uint8_t idx)
 		kbd->layer_state[idx].active = 1;
 	}
 
+	if (kbd->config.virtual_layers)
+		update_virtual_layers(kbd);
 	kbd->output.on_layer_change(kbd, &kbd->config.layers[idx], 1);
 }
 
@@ -931,6 +983,7 @@ struct keyboard *new_keyboard(struct config *config, const struct output *output
 
 	kbd->chord.queue_sz = 0;
 	kbd->chord.state = CHORD_INACTIVE;
+	update_virtual_layers(kbd);
 
 	return kbd;
 }
@@ -1274,6 +1327,10 @@ static long process_event(struct keyboard *kbd, uint8_t code, int pressed, long 
 
 			lookup_descriptor(kbd, code, &d, &dl);
 
+			if (kbd->active_virtual_layers && d.op == OP_KEYSEQUENCE &&
+			    (kbd->active_virtual_layers & kbd->config.virtual_layers_by_code[d.args[0].code]))
+				lookup_virtual(kbd, &d);
+
 			if (cache_set(kbd, code, &(struct cache_entry) { .d = d, .dl = dl, .layer = 0 }))
 				goto exit;
 		} else {
@@ -1320,10 +1377,13 @@ long kbd_process_events(struct keyboard *kbd, const struct key_event *events, si
 
 int kbd_eval(struct keyboard *kbd, const char *exp)
 {
-	if (!strcmp(exp, "reset")) {
+	int ret = 0;
+
+	if (!strcmp(exp, "reset"))
 		memcpy(&kbd->config, kbd->original_config, sizeof(struct config));
-		return 0;
-	} else {
-		return config_add_entry(&kbd->config, exp);
-	}
+	else
+		ret = config_add_entry(&kbd->config, exp);
+
+	update_virtual_layers(kbd);
+	return ret;
 }
