@@ -307,6 +307,29 @@ static struct descriptor *layer_lookup_chord(struct layer *layer, uint8_t *keys,
 	return NULL;
 }
 
+static int set_key_entry(const struct config *config, struct descriptor *keymap,
+			 const char *key, const struct descriptor *d)
+{
+	int found = 0;
+
+	for (size_t i = 0; i < 256; i++) {
+		if (!strcmp(config->aliases[i], key)) {
+			keymap[i] = *d;
+			found = 1;
+		}
+	}
+
+	if (!found) {
+		uint8_t code = lookup_keycode(key);
+		if (!code) {
+			err("%s is not a valid key or alias", key);
+			return -1;
+		}
+		keymap[code] = *d;
+	}
+	return 0;
+}
+
 /*
  * Consumes a string of the form `[<layer>.]<key> = <descriptor>` and adds the
  * mapping to the corresponding layer in the config.
@@ -316,9 +339,6 @@ static int set_layer_entry(const struct config *config,
 			   struct layer *layer, char *key,
 			   const struct descriptor *d)
 {
-	size_t i;
-	int found = 0;
-
 	if (d->op == OP_UNBIND && !strchr(key, '+')) {
 		err("unbind is only valid for chords");
 		return -1;
@@ -369,24 +389,7 @@ static int set_layer_entry(const struct config *config,
 			layer->nr_chords++;
 		}
 	} else {
-		for (i = 0; i < 256; i++) {
-			if (!strcmp(config->aliases[i], key)) {
-				layer->keymap[i] = *d;
-				found = 1;
-			}
-		}
-
-		if (!found) {
-			uint8_t code;
-
-			if (!(code = lookup_keycode(key))) {
-				err("%s is not a valid key or alias", key);
-				return -1;
-			}
-
-			layer->keymap[code] = *d;
-
-		}
+		return set_key_entry(config, layer->keymap, key, d);
 	}
 
 	return 0;
@@ -1252,8 +1255,8 @@ int config_add_entry(struct config *config, const char *exp)
 		char rhs[MAX_EXP_LEN];
 		size_t nr_descriptors = config->nr_descriptors;
 
-		if (idx || parse_key_sequence(keyname, &code, &mods) || mods) {
-			err("inherit requires an unmodified physical key on main");
+		if (idx || !keyname[0] || strchr(keyname, '+')) {
+			err("inherit requires a single key or alias on main");
 			return -1;
 		}
 		if (!descstr) {
@@ -1273,7 +1276,10 @@ int config_add_entry(struct config *config, const char *exp)
 			err("inherit requires a tap/hold expression");
 			return -1;
 		}
-		config->inherit_bindings[code] = d;
+		if (set_key_entry(config, config->inherit_bindings, keyname, &d) < 0) {
+			config->nr_descriptors = nr_descriptors;
+			return -1;
+		}
 		config->has_inherit = 1;
 		return 0;
 	}

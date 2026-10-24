@@ -403,19 +403,71 @@ static void test_aliases(const char *path)
 	assert(active("magic-caps"));
 
 	reset();
-	DOWN(A); WAIT(201);
-	EXPECT(KEYD_LEFTMETA);
-	UP(A);
-	EXPECT(-KEYD_LEFTMETA);
-	DOWN(V); WAIT(201);
-	EXPECT(KEYD_A);
+	DOWN(A);
+	EXPECT(KEYD_S);
+	WAIT(201);
 	assert(!active("meta"));
+	UP(A);
+	EXPECT(-KEYD_S);
+	WAIT(151);
+	DOWN(V); WAIT(201);
+	EXPECT(KEYD_LEFTMETA);
 	UP(V);
-	EXPECT(-KEYD_A);
+	EXPECT(-KEYD_LEFTMETA);
+
+	WAIT(151);
+	DOWN(102ND); WAIT(201);
+	EXPECT(KEYD_LEFTCTRL);
+	UP(102ND);
+	EXPECT(-KEYD_LEFTCTRL);
+	DOWN(Z);
+	EXPECT(KEYD_X);
+	WAIT(201);
+	assert(!active("control"));
+	UP(Z);
+	EXPECT(-KEYD_X);
+
+	reset();
+	TAP(X); TAP(C);
+	EXPECT(KEYD_X, -KEYD_X, KEYD_C, -KEYD_C);
+	DOWN(X);
+	EXPECT(KEYD_X);
+	WAIT(201);
+	assert(!active("alt"));
+	UP(X);
+	EXPECT(-KEYD_X);
+	WAIT(151);
+	DOWN(X); WAIT(201);
+	EXPECT(KEYD_LEFTALT);
+	UP(X);
+	EXPECT(-KEYD_LEFTALT);
+	WAIT(151);
+	DOWN(C); WAIT(201);
+	EXPECT(KEYD_LEFTALT);
+	UP(C);
+	EXPECT(-KEYD_LEFTALT);
+
+	assert(kbd_eval(kbd, "main.inherit tap-group = lettermod(control, inherit, 150, 200)") == 0);
+	const uint8_t group[] = { KEYD_X, KEYD_C };
+	for (size_t i = 0; i < ARRAY_SIZE(group); i++) {
+		WAIT(151);
+		event(group[i], 1, 1); WAIT(201);
+		EXPECT(KEYD_LEFTCTRL);
+		event(group[i], 0, 1);
+		EXPECT(-KEYD_LEFTCTRL);
+	}
+	assert(kbd_eval(kbd, "main.tap-group = noinherit(noop)") == 0);
+	for (size_t i = 0; i < ARRAY_SIZE(group); i++) {
+		event(group[i], 1, 1); WAIT(201);
+		event(group[i], 0, 1);
+		EXPECT();
+		assert(!active("control"));
+	}
+
+	reset();
 	assert(kbd_eval(kbd, "main.a = minus") == 0);
 	TAP(V); TAP(A);
 	EXPECT(KEYD_MINUS, -KEYD_MINUS, KEYD_S, -KEYD_S);
-	assert(kbd_eval(kbd, "inherit tap-group = lettermod(meta, inherit, 150, 200)") < 0);
 }
 
 int main(int argc, char **argv)

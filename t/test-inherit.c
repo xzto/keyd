@@ -371,6 +371,8 @@ static void test_runtime_and_parser(void)
 		"inherit a =",
 		"inherit a",
 		"inherit C-a = lettermod(meta, inherit, 150, 200)",
+		"inherit unknown-alias = lettermod(meta, inherit, 150, 200)",
+		"inherit = lettermod(meta, inherit, 150, 200)",
 		"inherit a+s = lettermod(meta, inherit, 150, 200)",
 		"number.inherit a = lettermod(meta, inherit, 150, 200)",
 		"number+nav.inherit a = lettermod(meta, inherit, 150, 200)",
