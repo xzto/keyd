@@ -50,7 +50,7 @@ int macro_parse(char *s, struct macro *macro)
 			uint32_t codepoint;
 			int chrsz;
 
-			while ((chrsz=utf8_read_char(tok, &codepoint))) {
+			while ((chrsz=utf8_read_char(tok, &codepoint)) > 0) {
 				int i;
 				int xcode;
 
@@ -73,6 +73,10 @@ int macro_parse(char *s, struct macro *macro)
 					ADD_ENTRY(MACRO_UNICODE, xcode);
 
 				tok += chrsz;
+			}
+			if (chrsz < 0) {
+				err("invalid UTF-8 in macro");
+				return -1;
 			}
 		}
 	}

@@ -12,7 +12,7 @@ static void validate(const char *path)
 	ret = config_parse(&config, path);
 	if (ret != 0) {
 		if (ret < 0)
-			keyd_log("\tr{FAILED} (file does not exist?)\n");
+			keyd_log("\tr{FAILED} (could not read configuration)\n");
 
 		rc = -1;
 	}

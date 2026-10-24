@@ -36,6 +36,7 @@ struct srcmap_entry {
 struct srcmap {
 	char paths[MAX_INCLUDES+1][PATH_MAX];
 	size_t num_paths;
+	size_t num_lines;
 
 	struct srcmap_entry entries[MAX_LINES];
 };
@@ -50,15 +51,17 @@ static void config_warn(const char *fmt, ...)
 	va_list ap;
 	char buf[1024];
 
-	if (current_file)
-		snprintf(buf, sizeof buf, "\ty{WARNING:} b{%s}:r{%zd}: %s\n", current_file, current_line + 1, fmt);
-	else
-		snprintf(buf, sizeof buf, "\ty{WARNING:} %s\n", fmt);
-
 	nr_warnings++;
 	va_start(ap, fmt);
-	_vkeyd_log(buf, ap);
+	vsnprintf(buf, sizeof buf, fmt, ap);
 	va_end(ap);
+
+	/* Filenames and diagnostics are data, never part of the format string. */
+	if (current_file) {
+		keyd_log("\ty{WARNING:} b{%s}:r{%zu}: %s\n", current_file, current_line + 1, buf);
+	} else {
+		keyd_log("\ty{WARNING:} %s\n", buf);
+	}
 }
 
 static struct {
@@ -128,139 +131,182 @@ static int exists_and_is_relative(const char *parent_dir, const char *path)
 	if (!realpath(path, p2))
 		return 0;
 
-	return !strncmp(p2, p1, strlen(p1));
+	size_t len = strlen(p1);
+	return !strncmp(p2, p1, len) && (p1[len-1] == '/' || p2[len] == '/' || !p2[len]);
 }
 
 static int resolve_include_path(const char *config_path, const char *include_path, char *resolved_path)
 {
-	size_t len;
-	size_t ret;
-	char config_dir[PATH_MAX-1];
-
-	snprintf(config_dir, sizeof config_dir, "%s", config_path);
-	if (!dirname(config_dir))
+	char config_dir[PATH_MAX];
+	int n = snprintf(config_dir, sizeof config_dir, "%s", config_path);
+	if (n < 0 || n >= (int)sizeof config_dir)
 		return -1;
 
-	assert(strlen(config_dir) + strlen(include_path) + 2 < PATH_MAX);
+	const char *parent = dirname(config_dir);
+	if (!parent)
+		return -1;
+	n = snprintf(resolved_path, PATH_MAX, "%s/%s", parent, include_path);
+	if (n < 0 || n >= PATH_MAX)
+		return -1;
 
-	len = strlen(config_dir);
-	strcpy(resolved_path, config_dir);
-	resolved_path[len] = '/';
-	strcpy(resolved_path + len + 1, include_path);
-
-	if (exists_and_is_relative(config_dir, resolved_path))
+	if (exists_and_is_relative(parent, resolved_path))
 		return 0;
 
-	snprintf(resolved_path, PATH_MAX, DATA_DIR"/%s", include_path);
+	n = snprintf(resolved_path, PATH_MAX, DATA_DIR"/%s", include_path);
+	if (n < 0 || n >= PATH_MAX)
+		return -1;
 	return !exists_and_is_relative(DATA_DIR, resolved_path);
 }
 
-static void append_line(char *buf, size_t buf_sz, size_t *off, const char *line)
+static FILE *open_config_file(const char *path)
+{
+	int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	struct stat st;
+
+	if (fd < 0) {
+		err("failed to open %s: %s", path, strerror(errno));
+		return NULL;
+	}
+	if (fstat(fd, &st) < 0) {
+		err("failed to stat %s: %s", path, strerror(errno));
+		close(fd);
+		return NULL;
+	}
+	if (!S_ISREG(st.st_mode)) {
+		err("%s is not a regular config file", path);
+		close(fd);
+		return NULL;
+	}
+
+	FILE *fh = fdopen(fd, "r");
+	if (!fh) {
+		err("failed to open stream for %s: %s", path, strerror(errno));
+		close(fd);
+	}
+	return fh;
+}
+
+static int append_line(char *buf, size_t *off, struct srcmap *srcmap,
+		       const char *line, const char *path, size_t line_num)
 {
 	size_t len = strlen(line);
-	assert(*off + len + 2 < buf_sz);
+	if (srcmap->num_lines >= ARRAY_SIZE(srcmap->entries)) {
+		err("maximum config lines (%d) exceeded", ARRAY_SIZE(srcmap->entries));
+		return -1;
+	}
+	if (len + 2 > MAX_FILE_SIZE - *off) {
+		err("maximum config size (%d) exceeded", MAX_FILE_SIZE);
+		return -1;
+	}
 
 	memcpy(buf + *off, line, len);
 	buf[*off + len] = '\n';
 	buf[*off + len + 1] = 0;
-
 	*off += len + 1;
+	srcmap->entries[srcmap->num_lines++] = (struct srcmap_entry) {
+		.path = path,
+		.line = line_num,
+	};
+	return 0;
 }
 
-static const char *read_line(FILE *fh)
+static int read_line(FILE *fh, char line[4096])
 {
-	static char line[4096];
 	size_t n = 0;
 	int c;
 
-	while (1) {
-		c = fgetc(fh);
-		if (c == -1 || c == '\n')
-			break;
-
-		assert(n < (sizeof(line)-1));
+	while ((c = fgetc(fh)) != EOF && c != '\n') {
+		if (!c || n >= 4095) {
+			err("config line contains NUL or exceeds maximum length (4095)");
+			return -1;
+		}
 		line[n++] = c;
 	}
-
-	if (n == 0 && c == -1)
-		return NULL;
+	if (ferror(fh)) {
+		err("failed to read config: %s", strerror(errno));
+		return -1;
+	}
+	if (!n && c == EOF)
+		return 0;
 
 	line[n] = 0;
-	return line;
+	if (utf8_strlen(line) < 0) {
+		err("invalid UTF-8 in config");
+		return -1;
+	}
+	return 1;
 }
 
 static char *read_config_file(const char *path, struct srcmap *srcmap)
 {
-	FILE *fh;
-	const char *line;
-
+	FILE *fh, *include_fh = NULL;
+	char line[4096];
 	const char include_prefix[] = "include ";
 	const size_t include_prefix_len = sizeof(include_prefix) - 1;
-
-	size_t off = 0;
+	size_t off = 0, config_line_num = 0;
 	static char output[MAX_FILE_SIZE];
-
-	size_t config_line_num = 0;
-	size_t output_line_num = 0;
+	int ret;
 
 	output[0] = 0;
-	if (!(fh = fopen(path, "r")))
+	current_file = path;
+	current_line = 0;
+	if (!(fh = open_config_file(path))) {
+		config_warn("%s", errstr);
 		return NULL;
+	}
 
 	srcmap->num_paths = 1;
+	srcmap->num_lines = 0;
 	snprintf(srcmap->paths[0], sizeof srcmap->paths[0], "%s", path);
 
-	while ((line = read_line(fh))) {
-		current_line = config_line_num;
+	while ((ret = read_line(fh, line)) > 0) {
 		current_file = path;
-
+		current_line = config_line_num;
 		if (!strncmp(line, include_prefix, include_prefix_len)) {
-			char *include_path;
-
-			assert(srcmap->num_paths < ARRAY_SIZE(srcmap->paths));
-
-			include_path = srcmap->paths[srcmap->num_paths];
-			if (!resolve_include_path(path, line + include_prefix_len, include_path)) {
-				FILE *include_fh;
-				size_t include_line_num = 0;
-
-				if (!(include_fh = fopen(include_path, "r"))) {
-					config_warn("failed to open %s", include_path);
-				} else {
-					srcmap->num_paths++;
-					while ((line = read_line(include_fh))) {
-						append_line(output, sizeof output, &off, line);
-
-						assert(output_line_num < ARRAY_SIZE(srcmap->entries));
-						srcmap->entries[output_line_num].path = include_path;
-						srcmap->entries[output_line_num].line = include_line_num++;
-
-						output_line_num++;
-					}
-					if (ferror(include_fh))
-						config_warn("failed to read %s", include_path);
-					fclose(include_fh);
-				}
-			} else {
-				config_warn("failed to resolve include path %s", line + include_prefix_len);
+			if (srcmap->num_paths >= ARRAY_SIZE(srcmap->paths)) {
+				err("maximum includes (%d) exceeded", MAX_INCLUDES);
+				goto fail;
 			}
-		} else {
-			append_line(output, sizeof output, &off, line);
-
-			assert(output_line_num < ARRAY_SIZE(srcmap->entries));
-			srcmap->entries[output_line_num].line = config_line_num;
-			srcmap->entries[output_line_num].path = srcmap->paths[0];
-
-			output_line_num++;
+			char *include_path = srcmap->paths[srcmap->num_paths++];
+			if (resolve_include_path(path, line + include_prefix_len, include_path)) {
+				config_warn("failed to resolve include path %s", line + include_prefix_len);
+			} else if (!(include_fh = open_config_file(include_path))) {
+				config_warn("%s", errstr);
+			} else {
+				size_t include_line_num = 0;
+				while ((ret = read_line(include_fh, line)) > 0) {
+					current_file = include_path;
+					current_line = include_line_num;
+					if (append_line(output, &off, srcmap, line, include_path, include_line_num) < 0)
+						goto fail;
+					include_line_num++;
+				}
+				current_file = include_path;
+				current_line = include_line_num;
+				if (ret < 0)
+					goto fail;
+				fclose(include_fh);
+				include_fh = NULL;
+			}
+		} else if (append_line(output, &off, srcmap, line, srcmap->paths[0], config_line_num) < 0) {
+			goto fail;
 		}
-
 		config_line_num++;
 	}
 
-	if (ferror(fh))
-		config_warn("failed to read %s", path);
+	current_file = path;
+	current_line = config_line_num;
+	if (ret < 0)
+		goto fail;
 	fclose(fh);
 	return output;
+
+fail:
+	config_warn("%s", errstr);
+	if (include_fh)
+		fclose(include_fh);
+	fclose(fh);
+	return NULL;
 }
 
 
@@ -413,7 +459,6 @@ static int new_layer(char *s, const struct config *config, struct layer *layer)
 
 	if (strchr(name, '+')) {
 		char *layername;
-		int n = 0;
 
 		layer->type = LT_COMPOSITE;
 		layer->nr_constituents = 0;
@@ -431,7 +476,7 @@ static int new_layer(char *s, const struct config *config, struct layer *layer)
 				return -1;
 			}
 
-			if (n >= ARRAY_SIZE(layer->constituents)) {
+			if (layer->nr_constituents >= ARRAY_SIZE(layer->constituents)) {
 				err("max composite layers (%d) exceeded", ARRAY_SIZE(layer->constituents));
 				return -1;
 			}
@@ -475,6 +520,10 @@ static int config_add_layer(struct config *config, const char *s)
 
 	strcpy(buf, s);
 	name = strtok(buf, ":");
+	if (!name) {
+		err("empty layer name");
+		return -1;
+	}
 
 	if (config_get_layer_index(config, name) != -1)
 			return 1;
@@ -551,7 +600,10 @@ exit:
 			return -1;
 
 		if (arg != c) {
-			assert(*nargs < 5);
+			if (*nargs >= 5) {
+				err("maximum action arguments (5) exceeded");
+				return -1;
+			}
 			args[(*nargs)++] = arg;
 		}
 
@@ -669,7 +721,7 @@ static int parse_descriptor(char *s,
 		}
 
 		if (layer) {
-			config_warn("You should use b{layer(%s)} instead of assigning to b{%s} directly.", layer, KEY_NAME(code));
+			config_warn("You should use layer(%s) instead of assigning to %s directly.", layer, KEY_NAME(code));
 			d->op = OP_LAYER;
 			d->args[0].idx = config_get_layer_index(config, layer);
 
@@ -847,6 +899,10 @@ static void parse_global_section(struct config *config, struct ini_section *sect
 
 	for (i = 0; i < section->nr_entries;i++) {
 		struct ini_entry *ent = &section->entries[i];
+		if (!ent->val) {
+			config_warn("global option %s requires a value", ent->key);
+			continue;
+		}
 
 		if (!strcmp(ent->key, "macro_timeout"))
 			config->macro_timeout = atoi(ent->val);
@@ -878,36 +934,33 @@ static void parse_id_section(struct config *config, struct ini_section *section)
 {
 	size_t i;
 	for (i = 0; i < section->nr_entries; i++) {
-		uint16_t product, vendor;
-
-		struct ini_entry *ent = &section->entries[i];
-		const char *s = ent->key;
+		const char *s = section->entries[i].key;
+		uint8_t flags = ID_KEYBOARD | ID_KEY | ID_MOUSE;
 
 		if (!strcmp(s, "*")) {
 			config->wildcard = 1;
-		} else if (strstr(s, "m:") == s) {
-			assert(config->nr_ids < ARRAY_SIZE(config->ids));
-			config->ids[config->nr_ids].flags = ID_MOUSE;
-
-			snprintf(config->ids[config->nr_ids++].id, sizeof(config->ids[0].id), "%s", s+2);
-		} else if (strstr(s, "k:") == s) {
-			assert(config->nr_ids < ARRAY_SIZE(config->ids));
-			config->ids[config->nr_ids].flags = ID_KEYBOARD | ID_KEY;
-
-			snprintf(config->ids[config->nr_ids++].id, sizeof(config->ids[0].id), "%s", s+2);
-		} else if (strstr(s, "-") == s) {
-			assert(config->nr_ids < ARRAY_SIZE(config->ids));
-			config->ids[config->nr_ids].flags = ID_EXCLUDED;
-
-			snprintf(config->ids[config->nr_ids++].id, sizeof(config->ids[0].id), "%s", s+1);
-		} else if (strlen(s) < sizeof(config->ids[config->nr_ids].id)-1) {
-			assert(config->nr_ids < ARRAY_SIZE(config->ids));
-			config->ids[config->nr_ids].flags = ID_KEYBOARD | ID_KEY | ID_MOUSE;
-
-			snprintf(config->ids[config->nr_ids++].id, sizeof(config->ids[0].id), "%s", s);
-		} else {
-			config_warn("%s is not a valid device id", s);
+			continue;
 		}
+		if (config->nr_ids >= ARRAY_SIZE(config->ids)) {
+			config_warn("maximum device ids (%d) exceeded", ARRAY_SIZE(config->ids));
+			return;
+		}
+		if (!strncmp(s, "m:", 2)) {
+			flags = ID_MOUSE;
+			s += 2;
+		} else if (!strncmp(s, "k:", 2)) {
+			flags = ID_KEYBOARD | ID_KEY;
+			s += 2;
+		} else if (*s == '-') {
+			flags = ID_EXCLUDED;
+			s++;
+		}
+		if (strlen(s) >= sizeof(config->ids[0].id)) {
+			config_warn("%s is not a valid device id", s);
+			continue;
+		}
+		config->ids[config->nr_ids].flags = flags;
+		strcpy(config->ids[config->nr_ids++].id, s);
 	}
 }
 
@@ -919,6 +972,10 @@ static void parse_alias_section(struct config *config, struct ini_section *secti
 		uint8_t code;
 		struct ini_entry *ent = &section->entries[i];
 		const char *name = ent->val;
+		if (!name) {
+			config_warn("alias %s requires a value", ent->key);
+			continue;
+		}
 
 		if ((code = lookup_keycode(ent->key))) {
 			ssize_t len = strlen(name);
@@ -955,7 +1012,7 @@ static int do_parse(struct config *config, char *content, const struct srcmap *s
 	nr_warnings = 0;
 
 	if (!(ini = ini_parse_string(content, NULL))) {
-		config_warn("Invalid config file (missing [ids] section)");
+		config_warn("%s", errstr);
 		return 1;
 	}
 
@@ -997,6 +1054,10 @@ static int do_parse(struct config *config, char *content, const struct srcmap *s
 			continue;
 
 		layername = strtok(section->name, ":");
+		if (!layername) {
+			config_warn("empty layer name");
+			continue;
+		}
 
 		for (j = 0; j < section->nr_entries;j++) {
 			char entry[MAX_EXP_LEN];
@@ -1015,7 +1076,11 @@ static int do_parse(struct config *config, char *content, const struct srcmap *s
 				continue;
 			}
 
-			snprintf(entry, sizeof entry, "%s.%s = %s", layername, ent->key, ent->val);
+			int len = snprintf(entry, sizeof entry, "%s.%s = %s", layername, ent->key, ent->val);
+			if (len < 0 || len >= (int)sizeof entry) {
+				config_warn("binding exceeds maximum expression length (%d)", MAX_EXP_LEN);
+				continue;
+			}
 
 			if (config_add_entry(config, entry) < 0)
 				config_warn("%s", errstr);
@@ -1083,15 +1148,19 @@ int config_parse(struct config *config, const char *path)
 {
 	char *content;
 	struct srcmap srcmap;
-	int read_warnings;
+	int result = -1;
 
 	config_init(config);
-	if (!(content = read_config_file(path, &srcmap)))
-		return -1;
+	if ((content = read_config_file(path, &srcmap))) {
+		int read_warnings = nr_warnings;
+		snprintf(config->path, sizeof(config->path), "%s", path);
+		result = read_warnings + do_parse(config, content, &srcmap);
+	}
 
-	read_warnings = nr_warnings;
-	snprintf(config->path, sizeof(config->path), "%s", path);
-	return read_warnings + do_parse(config, content, &srcmap);
+	/* Source-map paths belong to this stack frame. */
+	current_file = NULL;
+	current_line = 0;
+	return result;
 }
 
 int config_check_match(struct config *config, const char *id, uint8_t flags)

@@ -86,6 +86,12 @@ Use *keyd check* to validate configurations, including their includes. After fix
 an error, save the config again or run *keyd reload* to retry. If no configuration
 has loaded successfully yet, devices remain unmanaged until a reload succeeds.
 
+Config files and includes must be regular files containing UTF-8 text without
+embedded NUL bytes. Oversized files or lines, excessive sections, bindings, device
+IDs, includes, or action arguments are validation errors and reject a reload.
+Includes must resolve within the config's directory or the installed data directory;
+sibling directories with a matching name prefix are not considered contained.
+
 A valid config file has the extension _.conf_ and *must* begin with an _[ids]_
 section that has one of the following forms:
 

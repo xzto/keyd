@@ -14,6 +14,7 @@
 #include <assert.h>
 
 #include "ini.h"
+#include "log.h"
 #define MAX_INI_SIZE 65536
 
 /*
@@ -91,12 +92,12 @@ struct ini *ini_parse_string(char *s, const char *default_section_name)
 		}
 
 
-		while (isspace(line[0]))
+		while (isspace((unsigned char)line[0]))
 			line++;
 
 		len = strlen(line);
 
-		while(len > 0 && isspace(line[len-1]))
+		while(len > 0 && isspace((unsigned char)line[len-1]))
 			len--;
 
 		if (line[0] == 0)
@@ -107,13 +108,20 @@ struct ini *ini_parse_string(char *s, const char *default_section_name)
 		switch (line[0]) {
 		case '[':
 			if (line[len-1] == ']') {
-				assert(n < MAX_SECTIONS);
+				if (n >= MAX_SECTIONS) {
+					err("maximum sections (%d) exceeded", MAX_SECTIONS);
+					return NULL;
+				}
+				if (len <= 2 || len - 2 >= sizeof(ini.sections[0].name)) {
+					err("empty or oversized section name");
+					return NULL;
+				}
 
 				section = &ini.sections[n++];
 
 				line[len-1] = 0;
 
-				strncpy(section->name, line+1, sizeof(section->name));
+				strcpy(section->name, line+1);
 				section->nr_entries = 0;
 				section->lnum = ln;
 
@@ -127,16 +135,25 @@ struct ini *ini_parse_string(char *s, const char *default_section_name)
 
 		if (!section) {
 			if(default_section_name) {
+				if (strlen(default_section_name) >= sizeof(ini.sections[0].name)) {
+					err("oversized default section name");
+					return NULL;
+				}
 				section = &ini.sections[n++];
 				strcpy(section->name, default_section_name);
 
 				section->nr_entries = 0;
 				section->lnum = 0;
-			} else
+			} else {
+				err("invalid config file: entry before any section");
 				return NULL;
+			}
 		}
 
-		assert(section->nr_entries < MAX_SECTION_ENTRIES);
+		if (section->nr_entries >= MAX_SECTION_ENTRIES) {
+			err("maximum entries per section (%d) exceeded", MAX_SECTION_ENTRIES);
+			return NULL;
+		}
 
 		ent = &section->entries[section->nr_entries++];
 		parse_kvp(line, &ent->key, &ent->val);

@@ -3,8 +3,6 @@
  *
  * © 2019 Raheman Vaiya (see also: LICENSE).
  */
-#include <assert.h>
-
 #include "string.h"
 
 int utf8_read_char(const char *_s, uint32_t *code)
@@ -14,25 +12,38 @@ int utf8_read_char(const char *_s, uint32_t *code)
 	if (!s[0])
 		return 0;
 
-	if (s[0] >= 0xF0) {
-		assert(s[1]);
-		assert(s[2]);
-		assert(s[3]);
-		*code = (s[0] & 0x07) << 18 | (s[1] & 0x3F) << 12 | (s[2] & 0x3F) << 6 | (s[3] & 0x3F);
-		return 4;
-	} else if (s[0] >= 0xE0) {
-		assert(s[1]);
-		assert(s[2]);
-		*code = (s[0] & 0x0F) << 12 | (s[1] & 0x3F) << 6 | (s[2] & 0x3F);
-		return 3;
-	} else if (s[0] >= 0xC0) {
-		assert(s[1]);
-		*code = (s[0] & 0x1F) << 6 | (s[1] & 0x3F);
-		return 2;
-	} else {
-		*code = s[0] & 0x7F;
+	if (s[0] < 0x80) {
+		*code = s[0];
 		return 1;
 	}
+
+	int size;
+	uint32_t value, minimum;
+	if (s[0] >= 0xC2 && s[0] <= 0xDF) {
+		size = 2;
+		value = s[0] & 0x1F;
+		minimum = 0x80;
+	} else if (s[0] >= 0xE0 && s[0] <= 0xEF) {
+		size = 3;
+		value = s[0] & 0x0F;
+		minimum = 0x800;
+	} else if (s[0] >= 0xF0 && s[0] <= 0xF4) {
+		size = 4;
+		value = s[0] & 0x07;
+		minimum = 0x10000;
+	} else {
+		return -1;
+	}
+
+	for (int i = 1; i < size; i++) {
+		if (!s[i] || (s[i] & 0xC0) != 0x80)
+			return -1;
+		value = (value << 6) | (s[i] & 0x3F);
+	}
+	if (value < minimum || value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF))
+		return -1;
+	*code = value;
+	return size;
 }
 
 int utf8_strlen(const char *s)
@@ -41,12 +52,12 @@ int utf8_strlen(const char *s)
 	int csz;
 	int n = 0;
 
-	while ((csz = utf8_read_char(s, &code))) {
+	while ((csz = utf8_read_char(s, &code)) > 0) {
 		n++;
 		s+=csz;
 	}
 
-	return n;
+	return csz < 0 ? -1 : n;
 }
 
 int is_timeval(const char *s)

@@ -353,7 +353,7 @@ int parse_key_sequence(const char *s, uint8_t *codep, uint8_t *modsp)
 
 	uint8_t mods = 0;
 
-	while (c[1] == '-') {
+	while (*c && c[1] == '-') {
 		switch (*c) {
 		case 'C':
 			mods |= MOD_CTRL;
@@ -377,6 +377,8 @@ int parse_key_sequence(const char *s, uint8_t *codep, uint8_t *modsp)
 
 		c += 2;
 	}
+	if (!*c)
+		return -1;
 
 	for (i = 0; i < 256; i++) {
 		const struct keycode_table_ent *ent = &keycode_table[i];

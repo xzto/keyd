@@ -45,14 +45,19 @@ static void path_for(const char *name, char path[PATH_MAX])
 	assert(n > 0 && n < PATH_MAX);
 }
 
-static void write_file(const char *name, const char *content)
+static void write_bytes(const char *name, const void *content, size_t size)
 {
 	char path[PATH_MAX];
 	path_for(name, path);
-	FILE *fh = fopen(path, "w");
+	FILE *fh = fopen(path, "wb");
 	assert(fh);
-	assert(fputs(content, fh) >= 0);
+	assert(fwrite(content, 1, size, fh) == size);
 	assert(fclose(fh) == 0);
+}
+
+static void write_file(const char *name, const char *content)
+{
+	write_bytes(name, content, strlen(content));
 }
 
 static void remove_file(const char *name)
@@ -156,6 +161,15 @@ static void test_failed_reloads(void)
 		"",
 		"# empty configuration\n",
 		"[main]\na = x\n",
+		"[ids]\n*\n[]\na = b\n",
+		"[ids]\n*\n[:]\na = b\n",
+		"[ids]\n*\n[main]\na = overload(a, b, c, d, e, f)\n",
+		"[ids]\n*\n[main]\na = lettermod(meta, timeout(a, b, c, d, e, f), 150, 200)\n",
+		"[ids]\n*\n[main]\ninherit a = lettermod(meta, inherit, 1, 2, 3, 4)\n",
+		"[ids]\n*\n[main]\na = macro(\xF0)\n",
+		"[ids]\n*\n[global]\noneshot_timeout\n",
+		"[ids]\n*\n[aliases]\na\n",
+		"[ids]\n*\n[main+main+main+main+main+main+main+main+main]\na = b\n",
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(invalid); i++) {
 		write_file("default.conf", invalid[i]);
@@ -182,9 +196,152 @@ static void test_failed_reloads(void)
 	int n = snprintf(moved, sizeof moved, "%s-moved", CONFIG_DIR);
 	assert(n > 0 && (size_t)n < sizeof moved);
 	assert(rename(CONFIG_DIR, moved) == 0);
+	configwatch_handle();
+	assert(!config_reload_deadline);
 	assert(reload() < 0);
 	expect_preserved();
 	assert(rename(moved, CONFIG_DIR) == 0);
+}
+
+static char *repeat_text(const char *prefix, const char *part, size_t count, const char *suffix)
+{
+	size_t a = strlen(prefix), b = strlen(part), c = strlen(suffix);
+	char *text = malloc(a + b * count + c + 1);
+	assert(text);
+	memcpy(text, prefix, a);
+	for (size_t i = 0; i < count; i++)
+		memcpy(text + a + b * i, part, b);
+	memcpy(text + a + b * count, suffix, c + 1);
+	return text;
+}
+
+static void reject_repeated(const char *prefix, const char *part, size_t count, const char *suffix)
+{
+	char *text = repeat_text(prefix, part, count, suffix);
+	write_file("default.conf", text);
+	free(text);
+	autoreload();
+	expect_preserved();
+}
+
+static void test_parser_limits(void)
+{
+	const char *header = "[ids]\n*\n[main]\n";
+	reject_repeated("[ids]\n*\n", "[main]\n", 33, "");
+	reject_repeated(header, "a = b\n", 1025, "");
+	reject_repeated(header, "#\n", 4096, "");
+
+	const char *ids[] = { "k:device\n", "m:device\n", "-device\n", "device\n" };
+	for (size_t i = 0; i < ARRAY_SIZE(ids); i++)
+		reject_repeated("[ids]\n", ids[i], 65, "[main]\na = b\n");
+
+	char long_line[5002];
+	memset(long_line, 'x', sizeof long_line);
+	long_line[0] = '#';
+	long_line[5000] = '\n';
+	long_line[5001] = 0;
+	reject_repeated(header, long_line, 1, "");
+
+	char chunk[1027];
+	memset(chunk, 'x', sizeof chunk);
+	chunk[0] = '#';
+	chunk[1025] = '\n';
+	chunk[1026] = 0;
+	reject_repeated(header, chunk, 65, "");
+
+	write_file("shared", "");
+	reject_repeated(header, "include shared\n", 129, "");
+	char *text = repeat_text("", "#\n", 4096, "");
+	write_file("shared", text);
+	free(text);
+	reject_repeated(header, "include shared\n", 1, "");
+	text = repeat_text("", chunk, 65, "");
+	write_file("shared", text);
+	free(text);
+	reject_repeated(header, "include shared\n", 1, "");
+	write_file("shared", long_line);
+	reject_repeated(header, "include shared\n", 1, "");
+	remove_file("shared");
+
+	char include_line[4090];
+	memcpy(include_line, "include ", 8);
+	memset(include_line + 8, 'x', 4080);
+	include_line[4088] = '\n';
+	include_line[4089] = 0;
+	reject_repeated(header, include_line, 1, "");
+	reject_repeated("[ids]\n*\n[", "x", 300, "]\na = b\n");
+	reject_repeated("[ids]\n*\n[", "x", 65, "]\na = b\n");
+	reject_repeated(header, "a = x", 120, "\n");
+
+	const char embedded_nul[] = "[ids]\n*\n[main]\na = b\0s = d\n";
+	write_bytes("default.conf", embedded_nul, sizeof embedded_nul - 1);
+	autoreload();
+	expect_preserved();
+
+	const char *invalid_utf8[] = {
+		"\x80", "\xC0\xAF", "\xC2", "\xE2\x82", "\xF0\x9F\x92",
+		"\xED\xA0\x80", "\xF4\x90\x80\x80", "\xF5\x80\x80\x80",
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(invalid_utf8); i++) {
+		assert(utf8_strlen(invalid_utf8[i]) < 0);
+		char bytes[8];
+		strcpy(bytes, invalid_utf8[i]);
+		struct macro macro;
+		assert(macro_parse(bytes, &macro) < 0);
+		assert(input(bytes, strlen(bytes), 0) < 0);
+		char config_text[128];
+		snprintf(config_text, sizeof config_text, "%sa = macro(%s)\n", header, invalid_utf8[i]);
+		reject_repeated("", config_text, 1, "");
+	}
+	uint32_t codepoint;
+	assert(utf8_read_char("\xF0\x9F\x98\x80", &codepoint) == 4 && codepoint == 0x1F600);
+	assert(utf8_strlen("é€😀") == 3);
+	assert(parse_key_sequence("C-", NULL, NULL) < 0);
+	uint8_t keycode, mods;
+	assert(parse_key_sequence("C--", &keycode, &mods) == 0);
+	assert(keycode == KEYD_MINUS && mods == MOD_CTRL);
+
+	static struct config probe;
+	char path[PATH_MAX];
+	write_file("valid-utf8", "[ids]\n*\n[main]\n# é€😀\na = b\n");
+	path_for("valid-utf8", path);
+	assert(config_parse(&probe, path) == 0);
+	remove_file("valid-utf8");
+
+	path_for("pipe", path);
+	assert(mkfifo(path, 0600) == 0);
+	reject_repeated(header, "include pipe\n", 1, "");
+	remove_file("pipe");
+	remove_file("default.conf");
+	path_for("default.conf", path);
+	assert(mkfifo(path, 0600) == 0);
+	autoreload();
+	expect_preserved();
+	remove_file("default.conf");
+
+	char sibling[PATH_MAX], sibling_file[PATH_MAX], config_text[PATH_MAX + 64];
+	int n = snprintf(sibling, sizeof sibling, "%s-sibling", CONFIG_DIR);
+	assert(n > 0 && (size_t)n < sizeof sibling);
+	assert(mkdir(sibling, 0700) == 0);
+	n = snprintf(sibling_file, sizeof sibling_file, "%s/keys", sibling);
+	assert(n > 0 && (size_t)n < sizeof sibling_file);
+	FILE *fh = fopen(sibling_file, "w");
+	assert(fh && fputs("a = x\n", fh) >= 0);
+	assert(fclose(fh) == 0);
+	n = snprintf(config_text, sizeof config_text, "%sinclude ../%s/keys\n",
+		     header, strrchr(sibling, '/') + 1);
+	assert(n > 0 && (size_t)n < sizeof config_text);
+	reject_repeated("", config_text, 1, "");
+	assert(unlink(sibling_file) == 0 && rmdir(sibling) == 0);
+
+	write_file("default.conf", replacement_config);
+	write_file("percent%n.conf", "[ids]\n*\n[main]\na = unknown-action\n");
+	autoreload();
+	expect_preserved();
+	remove_file("percent%n.conf");
+	write_file("percent%n", "a = unknown-action\n");
+	reject_repeated(header, "include percent%n\n", 1, "");
+	remove_file("percent%n");
 }
 
 static void test_read_errors(void)
@@ -266,6 +423,7 @@ int main(void)
 	assert(kbd->chord.state == CHORD_PENDING_DISAMBIGUATION);
 	assert(kbd->layer_state[config_get_layer_index(&kbd->config, "keep")].oneshot_depth == 1);
 	save_state();
+	test_parser_limits();
 	test_failed_reloads();
 	test_read_errors();
 	test_recovery_and_removal();

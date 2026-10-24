@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/* Return -1 on invalid UTF-8; read_char returns 0 at the terminator. */
 int utf8_read_char(const char *_s, uint32_t *code);
 int utf8_strlen(const char *s);
 

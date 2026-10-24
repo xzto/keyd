@@ -174,7 +174,7 @@ static void configwatch_handle(void)
 				continue;
 
 			if (watch->is_config_dir) {
-				size_t len = strlen(ev->name);
+				size_t len = ev->len ? strnlen(ev->name, ev->len) : 0;
 
 				if (len < 5 || strcmp(ev->name + len - 5, ".conf"))
 					continue;
@@ -555,6 +555,10 @@ static int input(char *buf, size_t sz, uint32_t timeout)
 	int csz;
 
 	while ((csz = utf8_read_char(buf, &codepoint))) {
+		if (csz < 0) {
+			err("invalid UTF-8 in input");
+			return -1;
+		}
 		int found = 0;
 		char s[2];
 
