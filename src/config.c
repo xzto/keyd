@@ -203,6 +203,7 @@ static char *read_config_file(const char *path, struct srcmap *srcmap)
 	size_t config_line_num = 0;
 	size_t output_line_num = 0;
 
+	output[0] = 0;
 	if (!(fh = fopen(path, "r")))
 		return NULL;
 
@@ -220,26 +221,26 @@ static char *read_config_file(const char *path, struct srcmap *srcmap)
 
 			include_path = srcmap->paths[srcmap->num_paths];
 			if (!resolve_include_path(path, line + include_prefix_len, include_path)) {
-				FILE *fh;
+				FILE *include_fh;
 				size_t include_line_num = 0;
 
-				if (!(fh = fopen(include_path, "r"))) {
+				if (!(include_fh = fopen(include_path, "r"))) {
 					config_warn("failed to open %s", include_path);
-					continue;
+				} else {
+					srcmap->num_paths++;
+					while ((line = read_line(include_fh))) {
+						append_line(output, sizeof output, &off, line);
+
+						assert(output_line_num < ARRAY_SIZE(srcmap->entries));
+						srcmap->entries[output_line_num].path = include_path;
+						srcmap->entries[output_line_num].line = include_line_num++;
+
+						output_line_num++;
+					}
+					if (ferror(include_fh))
+						config_warn("failed to read %s", include_path);
+					fclose(include_fh);
 				}
-
-				srcmap->num_paths++;
-				while ((line = read_line(fh))) {
-					append_line(output, sizeof output, &off, line);
-
-					assert(output_line_num < ARRAY_SIZE(srcmap->entries));
-					srcmap->entries[output_line_num].path = include_path;
-					srcmap->entries[output_line_num].line = include_line_num++;
-
-					output_line_num++;
-				}
-
-				fclose(fh);
 			} else {
 				config_warn("failed to resolve include path %s", line + include_prefix_len);
 			}
@@ -256,6 +257,8 @@ static char *read_config_file(const char *path, struct srcmap *srcmap)
 		config_line_num++;
 	}
 
+	if (ferror(fh))
+		config_warn("failed to read %s", path);
 	fclose(fh);
 	return output;
 }
@@ -956,6 +959,16 @@ static int do_parse(struct config *config, char *content, const struct srcmap *s
 		return 1;
 	}
 
+	if (srcmap) {
+		for (i = 0; i < ini->nr_sections; i++)
+			if (!strcmp(ini->sections[i].name, "ids"))
+				break;
+		if (i == ini->nr_sections) {
+			config_warn("Invalid config file (missing [ids] section)");
+			return nr_warnings;
+		}
+	}
+
 	/* First pass: create all layers based on section headers.  */
 	for (i = 0; i < ini->nr_sections; i++) {
 		struct ini_section *section = &ini->sections[i];
@@ -1070,13 +1083,15 @@ int config_parse(struct config *config, const char *path)
 {
 	char *content;
 	struct srcmap srcmap;
+	int read_warnings;
 
+	config_init(config);
 	if (!(content = read_config_file(path, &srcmap)))
 		return -1;
 
-	config_init(config);
+	read_warnings = nr_warnings;
 	snprintf(config->path, sizeof(config->path), "%s", path);
-	return do_parse(config, content, &srcmap);
+	return read_warnings + do_parse(config, content, &srcmap);
 }
 
 int config_check_match(struct config *config, const char *id, uint8_t flags)

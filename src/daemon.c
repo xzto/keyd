@@ -185,22 +185,19 @@ static void configwatch_handle(void)
 	}
 }
 
-static void free_configs(void)
+static void free_configs(struct config_ent *ent)
 {
-	struct config_ent *ent = configs;
 	while (ent) {
 		struct config_ent *tmp = ent;
 		ent = ent->next;
 		free(tmp->kbd);
 		free(tmp);
 	}
-
-	configs = NULL;
 }
 
 static void cleanup(void)
 {
-	free_configs();
+	free_configs(configs);
 	free_vkbd(vkbd);
 }
 
@@ -352,50 +349,84 @@ static void on_layer_change(const struct keyboard *kbd, const struct layer *laye
 	}
 }
 
-static void load_configs(void)
+static int load_configs(struct config_ent **result)
 {
 	DIR *dh = opendir(CONFIG_DIR);
-	struct dirent *dirent;
+	struct config_ent *candidates = NULL;
+	int failed = 0;
 
 	if (!dh) {
 		perror("opendir");
-		exit(-1);
+		return -1;
 	}
 
-	configs = NULL;
-
-	while ((dirent = readdir(dh))) {
-		char path[1024];
+	for (;;) {
+		struct dirent *dirent;
+		char path[PATH_MAX];
 		int len;
 
+		errno = 0;
+		dirent = readdir(dh);
+		if (!dirent) {
+			if (errno) {
+				perror("readdir");
+				failed = 1;
+			}
+			break;
+		}
 		if (dirent->d_type == DT_DIR)
 			continue;
 
+		size_t n = strlen(dirent->d_name);
+		if (n < 5 || strcmp(dirent->d_name + n - 5, ".conf"))
+			continue;
+
 		len = snprintf(path, sizeof path, "%s/%s", CONFIG_DIR, dirent->d_name);
-
-		if (len >= 5 && !strcmp(path + len - 5, ".conf")) {
-			struct config_ent *ent = calloc(1, sizeof(struct config_ent));
-
-			keyd_log("CONFIG: parsing b{%s}\n", path);
-
-			if (config_parse(&ent->config, path) >= 0) {
-				struct output output = {
-					.send_key = send_key,
-					.on_layer_change = on_layer_change,
-				};
-				ent->kbd = new_keyboard(&ent->config, &output);
-
-				ent->next = configs;
-				configs = ent;
-			} else {
-				free(ent);
-				keyd_log("DEVICE: y{WARNING} failed to parse %s\n", path);
-			}
-
+		if (len < 0 || len >= (int)sizeof path) {
+			keyd_log("CONFIG: y{WARNING} config path too long: %s\n", dirent->d_name);
+			failed = 1;
+			continue;
 		}
+
+		struct config_ent *ent = calloc(1, sizeof(*ent));
+		if (!ent) {
+			perror("calloc");
+			failed = 1;
+			break;
+		}
+		keyd_log("CONFIG: parsing b{%s}\n", path);
+		if (config_parse(&ent->config, path) != 0) {
+			free(ent);
+			keyd_log("CONFIG: y{WARNING} failed to validate %s\n", path);
+			failed = 1;
+			continue;
+		}
+
+		struct output output = {
+			.send_key = send_key,
+			.on_layer_change = on_layer_change,
+		};
+		ent->kbd = new_keyboard(&ent->config, &output);
+		if (!ent->kbd) {
+			perror("calloc");
+			free(ent);
+			failed = 1;
+			break;
+		}
+		ent->next = candidates;
+		candidates = ent;
 	}
 
-	closedir(dh);
+	if (closedir(dh) < 0) {
+		perror("closedir");
+		failed = 1;
+	}
+	if (failed) {
+		free_configs(candidates);
+		return -1;
+	}
+	*result = candidates;
+	return 0;
 }
 
 static struct config_ent *lookup_config_ent(const char *id, uint8_t flags)
@@ -461,22 +492,31 @@ static void manage_device(struct device *dev)
 	}
 }
 
-static void reload(void)
+static int reload(void)
 {
+	struct config_ent *candidates, *previous;
 	size_t i;
 
 	config_reload_deadline = 0;
 
-	free_configs();
-	load_configs();
+	if (load_configs(&candidates) < 0) {
+		/* Keep watching failed paths so a later edit can recover. */
+		configwatch_refresh();
+		keyd_log("CONFIG: y{WARNING} reload rejected; keeping previous configuration\n");
+		return -1;
+	}
+
+	previous = configs;
+	configs = candidates;
 	configwatch_refresh();
 
 	for (i = 0; i < device_table_sz; i++)
 		manage_device(&device_table[i]);
 
-	/* configs (and their keyboards) were just freed. */
 	active_kbd = NULL;
 	clear_vkbd();
+	free_configs(previous);
+	return 0;
 }
 
 static void send_success(int con)
@@ -613,8 +653,10 @@ static void handle_client(int con)
 			send_success(con);
 		break;
 	case IPC_RELOAD:
-		reload();
-		send_success(con);
+		if (reload() < 0)
+			send_fail(con, "configuration reload failed; keeping previous configuration");
+		else
+			send_success(con);
 		break;
 	case IPC_LAYER_LISTEN:
 		add_listener(con);

@@ -73,7 +73,18 @@ Config files are stored in _/etc/keyd/_ and loaded upon initialization.
 The reload command can be used to update the working set of config
 files (e.g sudo keyd reload).
 
-Config files are also reloaded automatically when they change.
+Config files are also reloaded automatically when they change. Reloads are
+transactional: all _.conf_ files must parse without warnings or errors before any
+changes are applied. If a file cannot be read, a binding is invalid, or an include
+is missing, the entire reload is rejected and the previous configuration remains
+active. Device grabs, held keys, active layers, and pending actions are not reset
+by a rejected reload. Intentional deletion of a config file takes effect when the
+remaining files validate successfully.
+
+Errors are logged, and a failed manual *reload* command returns a failure status.
+Use *keyd check* to validate configurations, including their includes. After fixing
+an error, save the config again or run *keyd reload* to retry. If no configuration
+has loaded successfully yet, devices remain unmanaged until a reload succeeds.
 
 A valid config file has the extension _.conf_ and *must* begin with an _[ids]_
 section that has one of the following forms:

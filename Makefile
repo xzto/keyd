@@ -114,3 +114,5 @@ test-io:
 	./bin/test-virtual t/virtual.conf t/virtual-alias.conf
 	$(CC) -DDATA_DIR=\"\" -o bin/test-inherit t/test-inherit.c $(TEST_SOURCES)
 	./bin/test-inherit t/inherit.conf
+	$(CC) -DDATA_DIR=\"\" -ffunction-sections -fdata-sections -Wl,--gc-sections -o bin/test-reload t/test-reload.c $(TEST_SOURCES) src/util.c $(LDFLAGS)
+	./bin/test-reload
